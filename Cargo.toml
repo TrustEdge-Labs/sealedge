@@ -77,7 +77,15 @@ zeroize = { version = "1.7", features = ["derive"] }
 
 # CLI and system
 clap = { version = "4.5", features = ["derive"] }
-keyring = "2.0"
+# keyring 3.x: v2 pulled the old secret-service/zbus3/async-io1 stack (rustix 0.37),
+# which no longer compiles on current stable Rust. v3 uses a modern stack.
+# Backends must be selected explicitly in v3 (v2 chose them implicitly).
+keyring = { version = "3", default-features = false, features = [
+    "sync-secret-service",
+    "crypto-rust",
+    "apple-native",
+    "windows-native",
+] }
 
 # Optional features (cannot be defined at workspace level)
 # cpal, pkcs11, yubikey defined in individual crates

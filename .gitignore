@@ -47,3 +47,6 @@ demo-output/
 
 # Deploy credentials (never commit real .env)
 deploy/.env
+
+# Claude Code local worktrees (never commit — caused a git submodule error in CI)
+.claude/worktrees/

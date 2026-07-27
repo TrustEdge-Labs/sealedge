@@ -109,7 +109,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpcsclite-dev pkg-config pkgconf
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpcsclite-dev libdbus-1-dev pkg-config pkgconf
 
       # Clippy (reuses build artifacts for test step)
       - name: Clippy workspace
