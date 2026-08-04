@@ -172,6 +172,56 @@ fn c4_non_recipient_cannot_unwrap() {
 }
 
 #[test]
+fn c4_unwrap_device_pub_pin() {
+    // N3: --device-pub pins the expected signer; a wrong one fails, the right one works.
+    let dir = TempDir::new().unwrap();
+    let (dev_ed, _dev_x) = keygen(dir.path(), "device");
+    let (other_ed, _other_x) = keygen(dir.path(), "other");
+
+    let input = dir.path().join("input.bin");
+    fs::write(&input, b"pinned unwrap").unwrap();
+    let archive = dir.path().join("clip.seal");
+    seal()
+        .args([
+            "wrap",
+            "--unencrypted",
+            "--in",
+            input.to_str().unwrap(),
+            "--out",
+            archive.to_str().unwrap(),
+            "--device-key",
+            dir.path().join("device.key").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let base = |out: &str| {
+        let mut c = seal();
+        c.args([
+            "unwrap",
+            archive.to_str().unwrap(),
+            "--unencrypted",
+            "--device-key",
+            dir.path().join("device.key").to_str().unwrap(),
+            "--out",
+            dir.path().join(out).to_str().unwrap(),
+        ]);
+        c
+    };
+
+    // Wrong expected signer → fail closed.
+    base("wrong.bin")
+        .args(["--device-pub", &other_ed])
+        .assert()
+        .failure();
+    // Correct expected signer → success.
+    base("ok.bin")
+        .args(["--device-pub", &dev_ed])
+        .assert()
+        .success();
+}
+
+#[test]
 fn c4_seed_mode_is_byte_deterministic() {
     let dir = TempDir::new().unwrap();
     keygen(dir.path(), "device");

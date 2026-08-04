@@ -250,7 +250,7 @@ struct UnwrapCmd {
     #[arg(
         long = "device-key",
         value_name = "PATH",
-        help = "Path to device signing key file"
+        help = "Path to the recipient's V2 key bundle (device owner or auditor)"
     )]
     device_key: PathBuf,
     #[arg(
@@ -259,6 +259,15 @@ struct UnwrapCmd {
         help = "Output file path for recovered data"
     )]
     output: PathBuf,
+    /// Optional expected signer. When set, unwrap fails unless it equals the
+    /// manifest's device.public_key. The signature is always verified against the
+    /// manifest's embedded key regardless; this flag pins which signer you expect.
+    #[arg(
+        long = "device-pub",
+        value_name = "KEY",
+        help = "Optional expected signer (ed25519:<base64>); pins manifest.device.public_key"
+    )]
+    device_pub: Option<String>,
     /// Accept plaintext key files without passphrase prompt (for CI/automation only)
     #[arg(long)]
     unencrypted: bool,
@@ -765,15 +774,20 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
     // Chunk AAD binds ciphertext to the full signing identity (M1).
     let chunk_aad = chunk_aad_v2(&signing_public_key, &args.profile, &started_at);
 
+    // Borrow the CEK once as an AEAD key. `from_slice` is a reference into the
+    // ContentKey (zeroized on drop) — not a separate owned/non-zeroizing copy.
+    let chunk_key = cek
+        .as_ref()
+        .map(|c| chacha20poly1305::Key::from_slice(c.as_bytes()));
+
     for (i, chunk_data) in chunks.iter().enumerate() {
         let chunk_id = i as u32;
 
         // Encrypted mode: on-disk chunk is [nonce:24][ciphertext]. Sign-only mode
         // stores the plaintext chunk directly.
-        let stored_chunk = match cek.as_ref() {
-            Some(cek) => {
+        let stored_chunk = match chunk_key {
+            Some(key) => {
                 let nonce = generate_seeded_nonce24(&mut *rng);
-                let key = chacha20poly1305::Key::from_slice(cek.as_bytes());
                 let ct = encrypt_segment(key, &nonce, chunk_data, &chunk_aad)?;
                 let mut c = Vec::with_capacity(24 + ct.len());
                 c.extend_from_slice(&nonce);
@@ -1227,6 +1241,27 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     // Version dispatch (M3) before any signature check.
     require_supported_version(&manifest.trst_version)?;
 
+    // Optional signer pin (N3): if the caller states an expected signer, it must
+    // equal the manifest's embedded device key. The signature is verified against
+    // that embedded key either way; this just fails closed on an unexpected signer.
+    if let Some(expected) = args.device_pub.as_deref() {
+        let expected = if expected.starts_with("ed25519:") || expected.starts_with("ecdsa-p256:") {
+            expected.to_string()
+        } else {
+            format!("ed25519:{}", expected)
+        };
+        if expected != manifest.device.public_key {
+            return Err(CliExitError {
+                code: 10,
+                message: format!(
+                    "Signer mismatch: expected {}, archive is signed by {}",
+                    expected, manifest.device.public_key
+                ),
+            }
+            .into());
+        }
+    }
+
     // Verify signature against the manifest's OWN device.public_key (the signer).
     // The party unwrapping may be a recipient other than the device, so we do NOT
     // verify against the unwrapping key.
@@ -1296,6 +1331,7 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
                 message: format!("Failed to unwrap content key: {}", e),
             })?;
 
+            // Borrow (not copy) the recovered CEK; it is zeroized on drop.
             let key = chacha20poly1305::Key::from_slice(cek.as_bytes());
             let started_at = manifest_started_at(&manifest);
             let chunk_aad =

@@ -230,17 +230,19 @@ impl DeviceKeypair {
             )
             .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid nonce base64: {e}")))?;
 
-        let iterations = meta["iterations"]
+        // Validate as u64 BEFORE narrowing: a value that overflows u32 must be
+        // rejected, not silently truncated into an accepted range.
+        let iterations_u64 = meta["iterations"]
             .as_u64()
-            .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing iterations".into()))?
-            as u32;
-
-        if iterations < PBKDF2_MIN_ITERATIONS {
+            .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing iterations".into()))?;
+        if iterations_u64 < PBKDF2_MIN_ITERATIONS as u64 {
             return Err(CryptoError::InvalidKeyFormat(format!(
                 "Key file uses {} PBKDF2 iterations, minimum is {}",
-                iterations, PBKDF2_MIN_ITERATIONS
+                iterations_u64, PBKDF2_MIN_ITERATIONS
             )));
         }
+        let iterations = u32::try_from(iterations_u64)
+            .map_err(|_| CryptoError::InvalidKeyFormat("iterations value out of range".into()))?;
 
         if nonce_bytes.len() != 12 {
             return Err(CryptoError::InvalidKeyFormat(

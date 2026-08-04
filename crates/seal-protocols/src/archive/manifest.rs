@@ -879,6 +879,18 @@ impl TrstManifest {
             }
         }
 
+        // C4 (0.2.0): an encryption block with no recipients is a hard error —
+        // it is ambiguous between "mistake" and "intentionally unreadable".
+        // Sign-only archives use `encryption: None` instead (see the design doc).
+        if let Some(ref enc) = self.encryption {
+            if enc.recipients.is_empty() {
+                return Err(ManifestFormatError::InvalidField(
+                    "encryption.recipients cannot be empty (use sign-only mode for no encryption)"
+                        .to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -1629,6 +1641,24 @@ mod tests {
             b1, b2,
             "signature must remain excluded from canonical bytes"
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_recipients() {
+        // C4/N4: encryption present with zero recipients must be rejected.
+        let mut m = generic_manifest();
+        let mut enc = encryption_block();
+        enc.recipients.clear();
+        m.encryption = Some(enc);
+        let err = m.validate().unwrap_err();
+        assert!(
+            format!("{err}").contains("encryption.recipients cannot be empty"),
+            "expected empty-recipients rejection, got: {err}"
+        );
+
+        // With recipients present, the same manifest validates.
+        m.encryption = Some(encryption_block());
+        assert!(m.validate().is_ok());
     }
 
     #[test]

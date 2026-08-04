@@ -200,6 +200,11 @@ no CEK; `unwrap` on a sign-only archive simply returns the chunk bytes.
 1. Random CEK; encrypt chunks; build segments + continuity (as today).
 2. Recipients = `[device_x25519] + [--recipient …]`; HPKE-Seal CEK to each (§7).
 3. Assemble `0.2.0` manifest incl. `encryption` block; canonicalize; **sign with Ed25519**; write archive.
+4. `--sign-only` skips steps 1–2: plaintext chunks, `encryption: None`.
+5. **YubiKey backend limitation (as implemented):** HW-signed *encrypted* archives are
+   deferred — the chunk AAD / HPKE `info` bind to the signing key, which lives on the
+   device X25519 key for software but on hardware for yubikey. `--backend yubikey`
+   therefore currently requires `--sign-only`. (Software backend supports full encryption.)
 
 **verify** (public only — CLI `seal verify`, platform `/v1/verify`, WASM)
 - Unchanged semantics: signature (C1/C3 cross-check) + continuity (C2). Verifiers parse the `encryption` block only to include it in canonical bytes; they never need any secret. **No capability change.**

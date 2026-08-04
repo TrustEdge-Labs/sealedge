@@ -405,15 +405,17 @@ impl DeviceBundle {
         let nonce_bytes = BASE64
             .decode(meta["nonce"].as_str().unwrap_or_default())
             .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid nonce base64: {e}")))?;
-        let iterations = meta["iterations"]
+        // Validate as u64 before narrowing (reject overflow, don't truncate).
+        let iterations_u64 = meta["iterations"]
             .as_u64()
-            .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing iterations".into()))?
-            as u32;
-        if iterations < PBKDF2_MIN_ITERATIONS {
+            .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing iterations".into()))?;
+        if iterations_u64 < PBKDF2_MIN_ITERATIONS as u64 {
             return Err(CryptoError::InvalidKeyFormat(format!(
-                "Bundle uses {iterations} PBKDF2 iterations, minimum is {PBKDF2_MIN_ITERATIONS}"
+                "Bundle uses {iterations_u64} PBKDF2 iterations, minimum is {PBKDF2_MIN_ITERATIONS}"
             )));
         }
+        let iterations = u32::try_from(iterations_u64)
+            .map_err(|_| CryptoError::InvalidKeyFormat("iterations value out of range".into()))?;
         if nonce_bytes.len() != 12 {
             return Err(CryptoError::InvalidKeyFormat(
                 "Nonce must be 12 bytes".into(),
