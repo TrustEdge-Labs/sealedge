@@ -15,12 +15,13 @@ use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct SegmentDigest {
-    pub index: u32,
-    pub hash: String,
-}
+/// A segment reference (`{index, hash}`) as it appears on the wire.
+///
+/// This is the single canonical wire type re-exported from `sealedge-types`;
+/// the CLI (`seal emit-request`) and this engine share the exact same
+/// definition so the two sides cannot drift. The `SegmentDigest` name is
+/// retained as an alias for readability within the verification engine.
+pub use sealedge_types::verification::SegmentRef as SegmentDigest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -104,28 +105,48 @@ pub fn receipt_from_report(
     }
 }
 
+/// Verify the manifest signature against the canonical `.trst` contract.
+///
+/// This is the single source of truth for the signing contract, and it MUST
+/// stay byte-for-byte identical to what `seal wrap` signs:
+///
+/// - **Canonicalization**: the wire manifest is parsed into the canonical
+///   [`sealedge_core::TrstManifest`] and re-serialized with
+///   `to_canonical_bytes()` — the exact same function the CLI signs over.
+///   We deliberately do NOT canonicalize the raw `serde_json::Value`, because
+///   `serde_json::Value` objects are backed by a `BTreeMap` (keys re-serialize
+///   alphabetically) which does not match the manifest's hand-ordered fields.
+/// - **Signature format**: the `signature` field already carries its algorithm
+///   prefix (`"ed25519:BASE64"` / `"ecdsa-p256:BASE64"`) and is passed straight
+///   through to `verify_manifest`. We must NOT re-prepend a prefix here, or the
+///   value becomes `"ed25519:ed25519:..."` and base64 decoding fails.
 fn verify_signature(manifest: &serde_json::Value, device_pub: &str) -> Result<VerificationResult> {
-    // device_pub must have "ed25519:" prefix — core's verify_manifest expects it present
-    if !device_pub.starts_with("ed25519:") {
-        return Err(anyhow!("Device public key must have ed25519: prefix"));
+    // device_pub must carry an algorithm prefix — core's verify_manifest
+    // dispatches on the signature prefix and expects a matching key format.
+    if !device_pub.starts_with("ed25519:") && !device_pub.starts_with("ecdsa-p256:") {
+        return Err(anyhow!(
+            "Device public key must have an algorithm prefix (ed25519: or ecdsa-p256:)"
+        ));
     }
 
-    let signature_b64 = manifest
-        .get("signature")
-        .and_then(|s| s.as_str())
+    // Parse into the canonical manifest so signature verification uses exactly
+    // the same canonicalization the signer used. A manifest that does not match
+    // the .trst schema is an error (not a silent signature failure).
+    let parsed: sealedge_core::TrstManifest = serde_json::from_value(manifest.clone())
+        .map_err(|e| anyhow!("Manifest does not match the canonical .trst schema: {}", e))?;
+
+    // The signature travels inside the manifest, already algorithm-prefixed.
+    let signature = parsed
+        .signature
+        .as_deref()
         .ok_or_else(|| anyhow!("Missing signature in manifest"))?;
 
-    let canonicalized = canonicalize_manifest_for_signature(manifest)?;
+    // `to_canonical_bytes()` excludes the signature field, matching the signer.
+    let canonical_bytes = parsed
+        .to_canonical_bytes()
+        .map_err(|e| anyhow!("Failed to canonicalize manifest: {}", e))?;
 
-    // Core's verify_manifest expects "ed25519:BASE64" format for the signature.
-    // The manifest stores the raw base64 without the prefix, so we prepend it.
-    let signature_str = format!("ed25519:{}", signature_b64);
-
-    match sealedge_core::crypto::verify_manifest(
-        device_pub,
-        canonicalized.as_bytes(),
-        &signature_str,
-    ) {
+    match sealedge_core::crypto::verify_manifest(device_pub, &canonical_bytes, signature) {
         Ok(true) => Ok(VerificationResult {
             passed: true,
             error: None,
@@ -174,17 +195,6 @@ fn verify_continuity(segments: &[SegmentDigest]) -> Result<VerificationResult> {
         passed: true,
         error: None,
     })
-}
-
-fn canonicalize_manifest_for_signature(manifest: &serde_json::Value) -> Result<String> {
-    let mut manifest_copy = manifest.clone();
-
-    if let Some(obj) = manifest_copy.as_object_mut() {
-        obj.remove("signature");
-    }
-
-    let canonical = serde_json::to_string(&manifest_copy)?;
-    Ok(canonical)
 }
 
 /// Compute the genesis chain hash using sealedge_core's chain module.
@@ -242,7 +252,6 @@ fn format_b3(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_genesis_hash_computation() {
@@ -304,20 +313,6 @@ mod tests {
         let result = verify_continuity(&segments).unwrap();
         assert!(!result.passed);
         assert!(result.error.is_some());
-    }
-
-    #[test]
-    fn test_manifest_canonicalization() {
-        let manifest = json!({
-            "version": "1.0",
-            "segments": 3,
-            "signature": "should_be_removed"
-        });
-
-        let canonical = canonicalize_manifest_for_signature(&manifest).unwrap();
-        assert!(!canonical.contains("signature"));
-        assert!(canonical.contains("version"));
-        assert!(canonical.contains("segments"));
     }
 
     #[test]

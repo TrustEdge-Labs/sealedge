@@ -302,23 +302,19 @@ pub async fn verify_handler(
     validate_verify_request_full(&request).map_err(|e| (StatusCode::BAD_REQUEST, Json(e)))?;
 
     // Look up device record if device_id option was provided
-    let device_id = if let Some(ref options) = request.options {
-        if let Some(ref device_id_str) = options.device_id {
-            if let Some(ref ctx) = org_ctx {
-                crate::database::get_device(&state.db_pool, ctx.org_id, device_id_str)
-                    .await
-                    .map_err(|_| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ValidationError::new(
-                                "database_error",
-                                "Failed to query device",
-                            )),
-                        )
-                    })?
-            } else {
-                None
-            }
+    let device_id = if let Some(ref device_id_str) = request.options.device_id {
+        if let Some(ref ctx) = org_ctx {
+            crate::database::get_device(&state.db_pool, ctx.org_id, device_id_str)
+                .await
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ValidationError::new(
+                            "database_error",
+                            "Failed to query device",
+                        )),
+                    )
+                })?
         } else {
             None
         }
@@ -389,8 +385,9 @@ pub async fn verify_handler(
     let mut receipt_id = None;
 
     // Receipt construction inlined here due to DB storage interleaving.
-    if let Some(ref options) = request.options {
-        if options.return_receipt.unwrap_or(false)
+    {
+        let options = &request.options;
+        if options.return_receipt
             && report.signature_verification.passed
             && report.continuity_verification.passed
         {

@@ -129,12 +129,9 @@ pub async fn build_receipt_if_requested(
     manifest_digest_fn: impl Fn(&serde_json::Value) -> String,
     receipt_ttl_secs: u64,
 ) -> Result<Option<String>, ValidationError> {
-    let options = match &request.options {
-        Some(opts) => opts,
-        None => return Ok(None),
-    };
+    let options = &request.options;
 
-    if !options.return_receipt.unwrap_or(false)
+    if !options.return_receipt
         || !report.signature_verification.passed
         || !report.continuity_verification.passed
     {
@@ -192,7 +189,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::json!({}),
             segments: vec![],
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request(&request);
@@ -209,7 +206,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::json!({}),
             segments,
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request(&request);
@@ -226,7 +223,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::json!({}),
             segments,
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request(&request);
@@ -255,7 +252,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::json!({}),
             segments,
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request(&request);
@@ -272,7 +269,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::json!({}),
             segments,
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request(&request);
@@ -292,7 +289,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::json!({"version": "1.0"}),
             segments: vec![],
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request_full(&request);
@@ -308,7 +305,7 @@ mod tests {
             device_pub: "".to_string(),
             manifest: serde_json::json!({"version": "1.0"}),
             segments: vec![create_test_segment(0, valid_hash())],
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request_full(&request);
@@ -324,7 +321,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::Value::Null,
             segments: vec![create_test_segment(0, valid_hash())],
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request_full(&request);
@@ -340,7 +337,7 @@ mod tests {
             device_pub: "ed25519:test".to_string(),
             manifest: serde_json::json!({}),
             segments: vec![create_test_segment(0, valid_hash())],
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request_full(&request);
@@ -362,7 +359,7 @@ mod tests {
                     "b3:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
                 ),
             ],
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request_full(&request);
@@ -376,7 +373,7 @@ mod tests {
             device_pub: "".to_string(),
             manifest: serde_json::json!({"version": "1.0"}),
             segments: vec![],
-            options: None,
+            options: Default::default(),
         };
 
         let result = validate_verify_request_full(&request);

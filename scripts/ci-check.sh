@@ -207,7 +207,10 @@ else
 fi
 
 # Platform feature tests
+# golden_vectors locks the .trst signing contract (canonical bytes + signature
+# wire format) shared by the seal CLI and the platform verify engine (C1).
 if cargo test -p sealedge-platform --lib --locked && \
+   cargo test -p sealedge-platform --test golden_vectors --locked && \
    cargo test -p sealedge-platform --test verify_integration --locked && \
    cargo test -p sealedge-platform --test verify_integration --features http --locked; then
     pass "sealedge-platform tests"

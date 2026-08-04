@@ -15,11 +15,83 @@
 //! - Pure crypto tests (always available): happy path, tampered, wrong key, empty, key manager
 
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use ed25519_dalek::{Signer, SigningKey};
 use sealedge_platform::verify::engine::{verify_to_report, SegmentDigest};
 use sealedge_platform::verify::jwks::KeyManager;
-use serde_json::json;
+
+// ---------------------------------------------------------------------------
+// Real-archive helpers — the ACTUAL product contract.
+//
+// These build a manifest exactly the way `seal wrap` does: a canonical
+// `TrstManifest`, signed over `to_canonical_bytes()` with
+// `crypto::sign_manifest`, with the algorithm-prefixed signature stored inside
+// the manifest. Verifying such a manifest through `verify_to_report` is the
+// end-to-end gate that C1 was missing — if either side's canonicalization or
+// signature format drifts, these tests fail.
+// ---------------------------------------------------------------------------
+
+/// Build a real, canonically-signed `.trst` manifest for a freshly generated
+/// device key. Returns `(manifest_json_value, device_pub)`.
+fn build_real_signed_manifest(device_id: &str) -> (serde_json::Value, String) {
+    let keypair = sealedge_core::DeviceKeypair::generate().unwrap();
+    build_real_signed_manifest_with_key(&keypair, device_id)
+}
+
+/// Build a real, canonically-signed `.trst` manifest signed by `keypair`.
+/// Returns `(manifest_json_value, device_pub)` where `device_pub` is the
+/// keypair's public key (also embedded in the manifest).
+fn build_real_signed_manifest_with_key(
+    keypair: &sealedge_core::DeviceKeypair,
+    device_id: &str,
+) -> (serde_json::Value, String) {
+    use sealedge_core::{
+        ChunkInfo, DeviceInfo, GenericMetadata, ProfileMetadata, SegmentInfo, TrstManifest,
+    };
+
+    let mut manifest = TrstManifest {
+        trst_version: "0.1.0".to_string(),
+        profile: "generic".to_string(),
+        device: DeviceInfo {
+            id: device_id.to_string(),
+            model: "TrustEdgeRefCam".to_string(),
+            firmware_version: "1.0.0".to_string(),
+            public_key: keypair.public.clone(),
+        },
+        metadata: ProfileMetadata::Generic(GenericMetadata {
+            started_at: "2025-01-15T10:30:00Z".to_string(),
+            ended_at: "2025-01-15T10:30:02Z".to_string(),
+            ..Default::default()
+        }),
+        chunk: ChunkInfo {
+            size_bytes: 4096,
+            duration_seconds: 2.0,
+        },
+        segments: vec![SegmentInfo {
+            chunk_file: "00000.bin".to_string(),
+            blake3_hash: "b3:00".to_string(),
+            start_time: "2025-01-15T10:30:00Z".to_string(),
+            duration_seconds: 2.0,
+            continuity_hash: "b3:00".to_string(),
+        }],
+        claims: vec!["location:unknown".to_string()],
+        prev_archive_hash: None,
+        signature: None,
+    };
+
+    let canonical = manifest.to_canonical_bytes().unwrap();
+    let signature = sealedge_core::crypto::sign_manifest(keypair, &canonical).unwrap();
+    manifest.set_signature(signature);
+
+    let device_pub = keypair.public.clone();
+    (serde_json::to_value(&manifest).unwrap(), device_pub)
+}
+
+/// A single valid segment reference (index 0) for continuity checks.
+fn single_segment() -> Vec<SegmentDigest> {
+    vec![SegmentDigest {
+        index: 0,
+        hash: "b3:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+    }]
+}
 
 // ---------------------------------------------------------------------------
 // HTTP endpoint tests (require `http` feature)
@@ -30,8 +102,10 @@ mod http_tests {
     use super::*;
     use axum::{body::Body, http::header::CONTENT_TYPE, http::Request};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
-    use ed25519_dalek::{Signer, VerifyingKey as DalekVerifyingKey};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use ed25519_dalek::VerifyingKey as DalekVerifyingKey;
     use sealedge_platform::http::{create_router, AppState};
+    use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
     use tower::ServiceExt;
@@ -59,25 +133,11 @@ mod http_tests {
     // -----------------------------------------------------------------------
 
     /// Build a canonically signed manifest and return (signed_manifest, device_pub_string).
-    fn build_signed_manifest(
-        signing_key: &ed25519_dalek::SigningKey,
-    ) -> (serde_json::Value, String) {
-        let manifest = json!({
-            "version": "1.0",
-            "segments": 1,
-            "device_id": "test-device"
-        });
-
-        let manifest_bytes = serde_json::to_string(&manifest).unwrap().into_bytes();
-        let signature = signing_key.sign(&manifest_bytes);
-        let verifying_key = signing_key.verifying_key();
-
-        let mut signed_manifest = manifest.clone();
-        signed_manifest["signature"] = json!(BASE64.encode(signature.to_bytes()));
-
-        let device_pub = format!("ed25519:{}", BASE64.encode(verifying_key.as_bytes()));
-
-        (signed_manifest, device_pub)
+    ///
+    /// Delegates to the crate-level [`build_real_signed_manifest`] so the HTTP
+    /// round-trip exercises the exact product contract (`seal wrap` output).
+    fn build_signed_manifest(device_id: &str) -> (serde_json::Value, String) {
+        super::build_real_signed_manifest(device_id)
     }
 
     /// Build a valid VerifyRequest body as JSON bytes.
@@ -240,8 +300,7 @@ mod http_tests {
     async fn test_verify_round_trip() -> Result<()> {
         let app = create_test_app().await;
 
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        let (signed_manifest, device_pub) = build_signed_manifest(&signing_key);
+        let (signed_manifest, device_pub) = build_signed_manifest("test-device");
         let body_bytes = build_verify_body(&signed_manifest, &device_pub, true);
 
         let response = app
@@ -311,8 +370,7 @@ mod http_tests {
         let app_jwks = create_router(state);
 
         // Step 1: POST /v1/verify → receive JWS receipt
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        let (signed_manifest, device_pub) = build_signed_manifest(&signing_key);
+        let (signed_manifest, device_pub) = build_signed_manifest("test-device");
         let body_bytes = build_verify_body(&signed_manifest, &device_pub, true);
 
         let verify_resp = app_verify
@@ -432,14 +490,9 @@ mod http_tests {
         let app = create_test_app().await;
 
         // Sign with one key, but present a DIFFERENT key as device_pub
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        let wrong_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-
-        let (signed_manifest, _correct_pub) = build_signed_manifest(&signing_key);
-        let wrong_device_pub = format!(
-            "ed25519:{}",
-            BASE64.encode(wrong_key.verifying_key().as_bytes())
-        );
+        let (signed_manifest, _correct_pub) = build_signed_manifest("test-device");
+        let wrong_key = sealedge_core::DeviceKeypair::generate().unwrap();
+        let wrong_device_pub = wrong_key.public.clone();
 
         let body_bytes = build_verify_body(&signed_manifest, &wrong_device_pub, true);
 
@@ -491,8 +544,7 @@ mod http_tests {
 
     #[tokio::test]
     async fn sec_11_duplicate_submission_distinct_receipts() -> Result<()> {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        let (signed_manifest, device_pub) = build_signed_manifest(&signing_key);
+        let (signed_manifest, device_pub) = build_signed_manifest("test-device");
         let body_bytes = build_verify_body(&signed_manifest, &device_pub, true);
 
         // Two separate app instances — oneshot consumes the router.
@@ -591,39 +643,9 @@ mod http_tests {
 
     #[tokio::test]
     async fn sec_12_receipt_digest_bound_to_content() -> Result<()> {
-        // Two different signing keys with different device_id values in the manifest.
-        let key_a = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        let key_b = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-
-        // Build manifest A with device-alpha.
-        let manifest_a = serde_json::json!({
-            "version": "1.0",
-            "segments": 1,
-            "device_id": "device-alpha"
-        });
-        let manifest_bytes_a = serde_json::to_string(&manifest_a)?.into_bytes();
-        let sig_a = key_a.sign(&manifest_bytes_a);
-        let mut signed_a = manifest_a.clone();
-        signed_a["signature"] = serde_json::json!(BASE64.encode(sig_a.to_bytes()));
-        let device_pub_a = format!(
-            "ed25519:{}",
-            BASE64.encode(key_a.verifying_key().as_bytes())
-        );
-
-        // Build manifest B with device-beta.
-        let manifest_b = serde_json::json!({
-            "version": "1.0",
-            "segments": 1,
-            "device_id": "device-beta"
-        });
-        let manifest_bytes_b = serde_json::to_string(&manifest_b)?.into_bytes();
-        let sig_b = key_b.sign(&manifest_bytes_b);
-        let mut signed_b = manifest_b.clone();
-        signed_b["signature"] = serde_json::json!(BASE64.encode(sig_b.to_bytes()));
-        let device_pub_b = format!(
-            "ed25519:{}",
-            BASE64.encode(key_b.verifying_key().as_bytes())
-        );
+        // Two real, canonically-signed manifests with different device_id values.
+        let (signed_a, device_pub_a) = build_signed_manifest("device-alpha");
+        let (signed_b, device_pub_b) = build_signed_manifest("device-beta");
 
         let body_a = build_verify_body(&signed_a, &device_pub_a, true);
         let body_b = build_verify_body(&signed_b, &device_pub_b, true);
@@ -711,8 +733,7 @@ mod http_tests {
 
     #[tokio::test]
     async fn sec_12_same_content_same_digest() -> Result<()> {
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        let (signed_manifest, device_pub) = build_signed_manifest(&signing_key);
+        let (signed_manifest, device_pub) = build_signed_manifest("test-device");
         let body_bytes = build_verify_body(&signed_manifest, &device_pub, true);
 
         let app1 = create_test_app().await;
@@ -1011,8 +1032,7 @@ mod http_tests {
     async fn test_verify_success_unaffected_by_sanitization() -> Result<()> {
         let app = create_test_app().await;
 
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-        let (signed_manifest, device_pub) = build_signed_manifest(&signing_key);
+        let (signed_manifest, device_pub) = build_signed_manifest("test-device");
         let body_bytes = build_verify_body(&signed_manifest, &device_pub, false);
 
         let response = app
@@ -1376,35 +1396,24 @@ mod http_tests {
 // Pure crypto tests (no feature gates required)
 // ---------------------------------------------------------------------------
 
+// Two valid 64-hex BLAKE3 segment hashes used across the pure-crypto tests.
+const HASH_A: &str = "b3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const HASH_B: &str = "b3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
 #[test]
 fn test_happy_path_verification() -> Result<()> {
-    let signing_key = SigningKey::generate(&mut rand_core::OsRng);
-    let verifying_key = signing_key.verifying_key();
-
-    let manifest = json!({
-        "version": "1.0",
-        "segments": 2,
-        "device_id": "test_device"
-    });
-
-    let manifest_bytes = serde_json::to_string(&manifest)?.into_bytes();
-    let signature = signing_key.sign(&manifest_bytes);
-
-    let mut signed_manifest = manifest.clone();
-    signed_manifest["signature"] = json!(BASE64.encode(signature.to_bytes()));
+    let (signed_manifest, device_pub) = build_real_signed_manifest("test_device");
 
     let segments = vec![
         SegmentDigest {
             index: 0,
-            hash: "b3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=".to_string(),
+            hash: HASH_A.to_string(),
         },
         SegmentDigest {
             index: 1,
-            hash: "b3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=".to_string(),
+            hash: HASH_B.to_string(),
         },
     ];
-
-    let device_pub = format!("ed25519:{}", BASE64.encode(verifying_key.as_bytes()));
 
     let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
 
@@ -1417,34 +1426,39 @@ fn test_happy_path_verification() -> Result<()> {
 }
 
 #[test]
+fn test_tampered_manifest_fails_signature() -> Result<()> {
+    // A canonically-signed manifest whose content is mutated after signing must
+    // fail signature verification — the recomputed canonical bytes no longer
+    // match the signature.
+    let (mut signed_manifest, device_pub) = build_real_signed_manifest("test_device");
+    signed_manifest["device"]["id"] = serde_json::json!("tampered-device");
+
+    let segments = single_segment();
+    let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
+
+    assert!(
+        !report.signature_verification.passed,
+        "tampering with a signed field must break signature verification"
+    );
+    assert!(report.signature_verification.error.is_some());
+
+    Ok(())
+}
+
+#[test]
 fn test_tampered_segment_verification() -> Result<()> {
-    let signing_key = SigningKey::generate(&mut rand_core::OsRng);
-    let verifying_key = signing_key.verifying_key();
-
-    let manifest = json!({
-        "version": "1.0",
-        "segments": 2,
-        "device_id": "test_device"
-    });
-
-    let manifest_bytes = serde_json::to_string(&manifest)?.into_bytes();
-    let signature = signing_key.sign(&manifest_bytes);
-
-    let mut signed_manifest = manifest.clone();
-    signed_manifest["signature"] = json!(BASE64.encode(signature.to_bytes()));
+    let (signed_manifest, device_pub) = build_real_signed_manifest("test_device");
 
     let segments = vec![
         SegmentDigest {
             index: 0,
-            hash: "b3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=".to_string(),
+            hash: HASH_A.to_string(),
         },
         SegmentDigest {
             index: 2, // Skipped index 1 — continuity failure
-            hash: "b3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=".to_string(),
+            hash: HASH_B.to_string(),
         },
     ];
-
-    let device_pub = format!("ed25519:{}", BASE64.encode(verifying_key.as_bytes()));
 
     let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
 
@@ -1457,30 +1471,13 @@ fn test_tampered_segment_verification() -> Result<()> {
 
 #[test]
 fn test_wrong_key_verification() -> Result<()> {
-    let signing_key = SigningKey::generate(&mut rand_core::OsRng);
-    let wrong_key = SigningKey::generate(&mut rand_core::OsRng);
-    let wrong_verifying_key = wrong_key.verifying_key();
+    // Manifest signed by one key, verified against a different public key.
+    let (signed_manifest, _correct_pub) = build_real_signed_manifest("test_device");
+    let wrong_key = sealedge_core::DeviceKeypair::generate().unwrap();
 
-    let manifest = json!({
-        "version": "1.0",
-        "segments": 1,
-        "device_id": "test_device"
-    });
+    let segments = single_segment();
 
-    let manifest_bytes = serde_json::to_string(&manifest)?.into_bytes();
-    let signature = signing_key.sign(&manifest_bytes);
-
-    let mut signed_manifest = manifest.clone();
-    signed_manifest["signature"] = json!(BASE64.encode(signature.to_bytes()));
-
-    let segments = vec![SegmentDigest {
-        index: 0,
-        hash: "b3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=".to_string(),
-    }];
-
-    let wrong_device_pub = format!("ed25519:{}", BASE64.encode(wrong_verifying_key.as_bytes()));
-
-    let report = verify_to_report(&signed_manifest, &segments, &wrong_device_pub)?;
+    let report = verify_to_report(&signed_manifest, &segments, &wrong_key.public)?;
 
     assert!(!report.signature_verification.passed); // Should fail with wrong key
     assert!(report.signature_verification.error.is_some());
@@ -1491,24 +1488,9 @@ fn test_wrong_key_verification() -> Result<()> {
 
 #[test]
 fn test_empty_segments_verification() -> Result<()> {
-    let signing_key = SigningKey::generate(&mut rand_core::OsRng);
-    let verifying_key = signing_key.verifying_key();
-
-    let manifest = json!({
-        "version": "1.0",
-        "segments": 0,
-        "device_id": "test_device"
-    });
-
-    let manifest_bytes = serde_json::to_string(&manifest)?.into_bytes();
-    let signature = signing_key.sign(&manifest_bytes);
-
-    let mut signed_manifest = manifest.clone();
-    signed_manifest["signature"] = json!(BASE64.encode(signature.to_bytes()));
+    let (signed_manifest, device_pub) = build_real_signed_manifest("test_device");
 
     let segments = vec![];
-
-    let device_pub = format!("ed25519:{}", BASE64.encode(verifying_key.as_bytes()));
 
     let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
 

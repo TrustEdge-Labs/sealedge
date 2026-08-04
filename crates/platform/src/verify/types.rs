@@ -9,26 +9,16 @@
 //! Request/response types for the verification service.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-use super::engine::{SegmentDigest, VerifyReport};
+use super::engine::VerifyReport;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct VerifyRequest {
-    pub device_pub: String,
-    pub manifest: Value,
-    pub segments: Vec<SegmentDigest>,
-    pub options: Option<VerifyOptions>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct VerifyOptions {
-    pub return_receipt: Option<bool>,
-    pub device_id: Option<String>,
-}
+// The request wire types are the shared, canonical definitions from
+// `sealedge-types` — the exact same types the CLI (`seal emit-request`)
+// serializes. Re-exporting them (instead of maintaining a parallel copy here)
+// guarantees the request contract cannot silently drift between the two sides.
+// `sealedge_types::verification::SegmentRef` is aliased to `SegmentDigest` by
+// the engine, so `VerifyRequest.segments` matches `verify_to_report`'s input.
+pub use sealedge_types::verification::{VerifyOptions, VerifyRequest};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
