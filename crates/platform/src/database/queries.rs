@@ -67,13 +67,23 @@ pub async fn create_device(
     Ok(row.get("id"))
 }
 
-pub async fn get_device(pool: &PgPool, org_id: Uuid, device_id: &str) -> Result<Option<Uuid>> {
-    let row = sqlx::query("SELECT id FROM devices WHERE org_id = $1 AND device_id = $2")
-        .bind(org_id)
-        .bind(device_id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.map(|r| r.get("id")))
+/// Look up a device row and its registered public key by (org, device_id).
+///
+/// Returns `(id, device_pub)`. Used to bind a verification request's key to the
+/// registered device key (C3 registry binding) — callers must fail closed when
+/// this returns `None` or the stored key does not match the request.
+pub async fn get_device_with_pub(
+    pool: &PgPool,
+    org_id: Uuid,
+    device_id: &str,
+) -> Result<Option<(Uuid, String)>> {
+    let row =
+        sqlx::query("SELECT id, device_pub FROM devices WHERE org_id = $1 AND device_id = $2")
+            .bind(org_id)
+            .bind(device_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| (r.get("id"), r.get("device_pub"))))
 }
 
 pub async fn create_verification(

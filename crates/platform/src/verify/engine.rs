@@ -50,7 +50,20 @@ pub struct VerificationMetadata {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ReceiptClaims {
     pub verification_id: String,
+    /// The cryptographic signer: the public key the signature verified against.
+    /// This is the authoritative identity in the receipt and becomes the JWT
+    /// `sub`. A receipt attests "this key produced a well-formed signature over
+    /// this content" — nothing about who controls the key unless
+    /// `device_registered` is true.
+    pub signer_pub: String,
+    /// Claimed device identifier. Only trustworthy when `device_registered` is
+    /// true; otherwise it is unverified, client-supplied data carried for
+    /// reference only.
     pub device_id: String,
+    /// True only when the platform confirmed `device_id` against its device
+    /// registry AND the registered key equals `signer_pub`. Always false in
+    /// stateless/public verification and for self-signed attestations.
+    pub device_registered: bool,
     pub manifest_digest: String,
     pub chain_tip: String,
     pub timestamp: String,
@@ -84,17 +97,22 @@ pub fn verify_to_report(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn receipt_from_report(
     report: &VerifyReport,
     manifest_digest: &str,
+    signer_pub: &str,
     device_id: &str,
+    device_registered: bool,
     kid: &str,
     now_rfc3339: &str,
     chain_tip: &str,
 ) -> ReceiptClaims {
     ReceiptClaims {
         verification_id: format!("v_{}", uuid::Uuid::new_v4().simple()),
+        signer_pub: signer_pub.to_string(),
         device_id: device_id.to_string(),
+        device_registered,
         manifest_digest: manifest_digest.to_string(),
         chain_tip: chain_tip.to_string(),
         timestamp: now_rfc3339.to_string(),
@@ -128,6 +146,19 @@ fn verify_signature(
         return Err(anyhow!(
             "Device public key must have an algorithm prefix (ed25519: or ecdsa-p256:)"
         ));
+    }
+
+    // Consistency cross-check (C3): the key we verify against must be the same
+    // key the manifest itself claims as the device key. Otherwise a client could
+    // present a manifest attributed to device key A while getting us to verify —
+    // and attest — against an unrelated key B. On mismatch we do not attest.
+    if manifest.device.public_key != device_pub {
+        return Ok(VerificationResult {
+            passed: false,
+            error: Some(
+                "verification key does not match the manifest's device.public_key".to_string(),
+            ),
+        });
     }
 
     // The signature travels inside the manifest, already algorithm-prefixed.
@@ -439,15 +470,42 @@ mod tests {
         let receipt = receipt_from_report(
             &report,
             "digest123",
+            "ed25519:signerkey",
             "device_abc",
+            false,
             "key_001",
             "2026-02-21T00:00:00Z",
             "b3:test",
         );
 
         assert!(receipt.verification_id.starts_with("v_"));
+        assert_eq!(receipt.signer_pub, "ed25519:signerkey");
         assert_eq!(receipt.device_id, "device_abc");
+        assert!(!receipt.device_registered);
         assert_eq!(receipt.manifest_digest, "digest123");
         assert_eq!(receipt.kid, "key_001");
+    }
+
+    #[test]
+    fn test_signature_fails_when_verification_key_differs_from_manifest() {
+        // C3 cross-check: verifying against a key other than the manifest's own
+        // device.public_key must not pass, even if that key would validate the
+        // signature on its own.
+        let keypair = sealedge_core::DeviceKeypair::generate().unwrap();
+        let (manifest, _client) = chained_manifest(1);
+        let mut manifest = manifest;
+        manifest.device.public_key = keypair.public.clone();
+        let canonical = manifest.to_canonical_bytes().unwrap();
+        let sig = sealedge_core::crypto::sign_manifest(&keypair, &canonical).unwrap();
+        manifest.set_signature(sig);
+
+        // Present a DIFFERENT (also valid) key as the verification key.
+        let other = sealedge_core::DeviceKeypair::generate().unwrap();
+        let result = verify_signature(&manifest, &other.public).unwrap();
+        assert!(!result.passed);
+        assert!(result
+            .error
+            .unwrap()
+            .contains("does not match the manifest's device.public_key"));
     }
 }

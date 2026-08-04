@@ -218,10 +218,16 @@ pub async fn verify_attestation_handler(
             let keys = state.keys.read().await;
             let kid = keys.current_kid();
 
-            // Build ReceiptClaims minimally — point attestations don't have segments/chain
+            // Build ReceiptClaims minimally — point attestations don't have segments/chain.
+            // Attestations are self-signed: the signer is the embedded public key,
+            // and there is no device registry to bind it to (device_registered = false).
+            // The receipt attests "this key signed this subject↔evidence binding",
+            // not that the signer is a trusted/known device (C3).
             let receipt_claims = crate::verify::engine::ReceiptClaims {
                 verification_id,
+                signer_pub: device_pub.clone(),
                 device_id: device_pub.clone(),
+                device_registered: false,
                 manifest_digest,
                 chain_tip: "none".to_string(),
                 timestamp: now_rfc3339,
@@ -262,6 +268,12 @@ pub async fn verify_attestation_handler(
                         "public_key": device_pub,
                         "timestamp": attestation.timestamp,
                         "format": attestation.format,
+                        // Honest semantics (C3): this is a self-signed document. A
+                        // "verified" status means the signature is well-formed and was
+                        // produced by `public_key` — NOT that the signer is a trusted
+                        // or registered identity.
+                        "signer_registered": false,
+                        "trust": "self-signed: signature valid for the embedded public key; signer identity not established",
                     });
                     Ok(Json(VerifyAttestationResponse {
                         status: "verified".to_string(),
@@ -301,26 +313,56 @@ pub async fn verify_handler(
 
     validate_verify_request_full(&request).map_err(|e| (StatusCode::BAD_REQUEST, Json(e)))?;
 
-    // Look up device record if device_id option was provided
-    let device_id = if let Some(ref device_id_str) = request.options.device_id {
+    // Registry binding (C3): if the request claims a device_id and we have a
+    // tenant context, the device MUST be registered AND its stored key MUST
+    // equal request.device_pub. We fail closed on an unknown device or a key
+    // mismatch — otherwise device_id would be attacker-chosen identity attached
+    // to an unrelated key. When bound, `device_registered` marks the receipt's
+    // device_id as trustworthy.
+    let mut device_id: Option<uuid::Uuid> = None;
+    let mut device_registered = false;
+    if let Some(ref device_id_str) = request.options.device_id {
         if let Some(ref ctx) = org_ctx {
-            crate::database::get_device(&state.db_pool, ctx.org_id, device_id_str)
-                .await
-                .map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
+            let record =
+                crate::database::get_device_with_pub(&state.db_pool, ctx.org_id, device_id_str)
+                    .await
+                    .map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ValidationError::new(
+                                "database_error",
+                                "Failed to query device",
+                            )),
+                        )
+                    })?;
+
+            match record {
+                None => {
+                    return Err((
+                        StatusCode::FORBIDDEN,
                         Json(ValidationError::new(
-                            "database_error",
-                            "Failed to query device",
+                            "unknown_device",
+                            "device_id is not registered for this organization",
                         )),
-                    )
-                })?
-        } else {
-            None
+                    ));
+                }
+                Some((_, stored_pub)) if stored_pub != request.device_pub => {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ValidationError::new(
+                            "device_key_mismatch",
+                            "device_pub does not match the registered key for device_id",
+                        )),
+                    ));
+                }
+                Some((id, _)) => {
+                    device_id = Some(id);
+                    device_registered = true;
+                }
+            }
         }
-    } else {
-        None
-    };
+        // No tenant context (tenant-agnostic mode): cannot bind, stays unregistered.
+    }
 
     // Inline verification — direct call, no HTTP forwarding
     let report = match verify_to_report(&request.manifest, &request.segments, &request.device_pub) {
@@ -403,7 +445,9 @@ pub async fn verify_handler(
             let receipt_obj = receipt_from_report(
                 &report,
                 &manifest_digest_blake3,
+                &request.device_pub,
                 device_id_str,
+                device_registered,
                 &kid,
                 &now_rfc3339,
                 &report.metadata.chain_tip,

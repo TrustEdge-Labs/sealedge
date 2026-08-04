@@ -143,10 +143,15 @@ pub async fn build_receipt_if_requested(
     let now_rfc3339 = chrono::Utc::now().to_rfc3339();
     let kid = keys.current_kid();
 
+    // Stateless/public verification: the signer is the verification key, and
+    // device_id is an unverified claim (no registry to bind it). Registry
+    // binding (device_registered = true) only happens in the postgres handler.
     let receipt_obj = receipt_from_report(
         report,
         &manifest_digest,
+        &request.device_pub,
         device_id,
+        false,
         &kid,
         &now_rfc3339,
         &report.metadata.chain_tip,

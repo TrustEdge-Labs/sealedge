@@ -34,7 +34,10 @@ pub async fn sign_receipt_jws(
 
     let payload = JwsPayload {
         iss: "sealedge-verify-service".to_string(),
-        sub: receipt.device_id.clone(),
+        // The subject is the cryptographic signer (the verifying public key), not
+        // the client-supplied device_id (C3). The device_id — trustworthy only
+        // when receipt.device_registered is true — remains inside the receipt.
+        sub: receipt.signer_pub.clone(),
         iat: now,
         exp,
         receipt: receipt.clone(),

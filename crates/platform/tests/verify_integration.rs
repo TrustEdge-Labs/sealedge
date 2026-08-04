@@ -471,8 +471,23 @@ mod http_tests {
         let payload_bytes = BASE64URL.decode(parts[1])?;
         let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)?;
 
+        // C3: the JWT subject must be the cryptographic signer (the verifying
+        // public key), NOT the client-supplied device_id.
+        assert_eq!(
+            payload["sub"], device_pub,
+            "JWS sub must be the signer public key, not the client device_id"
+        );
+
         // The receipt is nested under the "receipt" field in JwsPayload
         let receipt_payload = &payload["receipt"];
+        assert_eq!(
+            receipt_payload["signer_pub"], device_pub,
+            "receipt signer_pub must be the verification key"
+        );
+        assert_eq!(
+            receipt_payload["device_registered"], false,
+            "stateless verification must mark device_registered = false"
+        );
         assert!(
             receipt_payload.get("device_id").is_some(),
             "JWS payload receipt must contain device_id"
@@ -550,6 +565,53 @@ mod http_tests {
         assert!(
             resp["receipt"].is_null(),
             "receipt must be null when signature verification fails"
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6b: C3 cross-check — a device_pub that differs from the manifest's
+    //          embedded device.public_key must fail signature and yield no
+    //          receipt, even if that key is otherwise well-formed.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_verify_rejects_key_mismatch_with_manifest() -> Result<()> {
+        let app = create_test_app().await;
+
+        let (signed_manifest, _manifest_key) = build_signed_manifest("test-device");
+        // A different, valid key presented as the verification key.
+        let other = sealedge_core::DeviceKeypair::generate().unwrap();
+        let body_bytes = build_verify_body(&signed_manifest, &other.public, true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/verify")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body_bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(
+            !resp["result"]["signature_verification"]["passed"]
+                .as_bool()
+                .unwrap_or(true),
+            "device_pub that does not match manifest.device.public_key must fail (C3)"
+        );
+        assert!(
+            resp["receipt"].is_null(),
+            "no receipt when the verification key does not match the manifest"
         );
 
         Ok(())
