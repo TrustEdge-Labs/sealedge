@@ -14,6 +14,9 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+/// The only `.trst` archive version this engine verifies (C4 clean break).
+pub const SUPPORTED_TRST_VERSION: &str = "0.2.0";
+
 /// A segment reference (`{index, hash}`) as it appears on the wire.
 ///
 /// This is the single canonical wire type re-exported from `sealedge-types`;
@@ -81,6 +84,17 @@ pub fn verify_to_report(
     // error, not a silent pass.
     let parsed: sealedge_core::TrstManifest = serde_json::from_value(manifest.clone())
         .map_err(|e| anyhow!("Manifest does not match the canonical .trst schema: {}", e))?;
+
+    // Version dispatch (M3, C4 §13.4): reject legacy/unknown formats before any
+    // signature check — canonical bytes differ across versions, so a mismatched
+    // version would otherwise surface as a misleading signature failure.
+    if parsed.trst_version != SUPPORTED_TRST_VERSION {
+        return Err(anyhow!(
+            "unsupported archive version {} (expected {})",
+            parsed.trst_version,
+            SUPPORTED_TRST_VERSION
+        ));
+    }
 
     let signature_result = verify_signature(&parsed, device_pub)?;
     let continuity = verify_continuity(&parsed, segments);
@@ -359,7 +373,7 @@ mod tests {
             });
         }
         let manifest = TrstManifest {
-            trst_version: "0.1.0".to_string(),
+            trst_version: "0.2.0".to_string(),
             profile: "generic".to_string(),
             device: DeviceInfo {
                 id: "TEST".to_string(),

@@ -280,11 +280,17 @@ impl DeviceKeypair {
     }
 }
 
-/// Derive a 32-byte XChaCha20Poly1305 chunk encryption key from a device Ed25519 secret key.
+/// Derive a 32-byte XChaCha20Poly1305 key from a 32-byte secret via HKDF-SHA256.
 ///
-/// Uses HKDF-SHA256 (RFC 5869) with an empty salt (the device key is high-entropy IKM)
-/// and a fixed domain tag `SEALEDGE_SEAL_CHUNK_KEY`. The output is deterministic:
-/// the same device key always produces the same chunk key.
+/// Uses HKDF-SHA256 (RFC 5869) with an empty salt (high-entropy IKM) and a fixed
+/// domain tag `SEALEDGE_SEAL_CHUNK_KEY`. Deterministic: the same input always
+/// yields the same key.
+///
+/// **C4 note:** as of the C4 redesign this is NO LONGER used on the archive path.
+/// Content is encrypted under a per-archive random CEK ([`crate::keywrap::ContentKey`])
+/// wrapped to recipients via HPKE — content keys must never be derived from the
+/// Ed25519 signing secret. Retained only as a general KDF helper (see the SEC-07
+/// key-derivation tests); do not wire it back into content encryption.
 pub fn derive_chunk_key(device_secret_bytes: &[u8; 32]) -> chacha20poly1305::Key {
     let hkdf = Hkdf::<Sha256>::new(None, device_secret_bytes.as_slice());
     let mut okm = [0u8; 32];

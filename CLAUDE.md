@@ -144,27 +144,38 @@ if backend.supports_operation(&operation) {
 }
 ```
 
-### .seal Archive Structure
+### .seal Archive Structure (`trst_version` 0.2.0, C4)
 
 ```
 clip-<id>.seal/
-├── manifest.json           # Canonical cam.video manifest
+├── manifest.json           # Canonical manifest (0.2.0) incl. device.key_agreement_public
+│                           #   and an `encryption` block (per-archive CEK wrapped to
+│                           #   recipients via HPKE); absent for --sign-only archives
 ├── signatures/
-│   └── manifest.sig        # Detached Ed25519 signature
+│   └── manifest.sig        # Detached Ed25519 signature (covers the encryption block)
 └── chunks/
-    ├── 00000.bin           # Zero-padded chunk files
-    └── ...
+    ├── 00000.bin           # Zero-padded chunk files; [nonce:24][ciphertext] when encrypted,
+    └── ...                 #   plaintext when --sign-only
 ```
 
-### Encrypted Key Files (SEALEDGE-KEY-V1)
+Content is encrypted under a per-archive random CEK (never derived from the signing
+key); the CEK is HPKE-wrapped to one or more recipients. Verifiers only need public
+keys and reject non-`0.2.0` archives. See `docs/designs/c4-content-encryption-redesign.md`.
 
-Device private keys are encrypted at rest using PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM.
-The format header is `SEALEDGE-KEY-V1`. A passphrase is prompted at runtime via `rpassword`.
+### Encrypted Key Files (SEALEDGE-KEY-V2)
+
+A device has an Ed25519 **signing** key and an independent X25519 **key-agreement**
+key, stored together as a `SEALEDGE-KEY-V2` bundle encrypted at rest with
+PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM (passphrase prompted via
+`rpassword`). The `.pub` file carries both public keys, one per line
+(`ed25519:...` then `x25519:...`). The Ed25519 key is used only for signing;
+confidentiality rides on the X25519 key. (Pre-C4 `SEALEDGE-KEY-V1` single-key
+files are rejected — re-run `seal keygen`.)
 
 For CI/automation where interactive prompts are not possible, use `--unencrypted`:
-- `seal keygen --unencrypted` — generates plaintext key file
-- `seal wrap --unencrypted` — reads key without passphrase prompt
-- `seal unwrap --unencrypted` — reads key without passphrase prompt
+- `seal keygen --unencrypted` — generates a plaintext key bundle
+- `seal wrap --unencrypted` — reads key bundle without passphrase prompt
+- `seal unwrap --unencrypted` — reads key bundle without passphrase prompt
 
 Production devices should always use encrypted key files. The `--unencrypted` flag is an
 explicit escape hatch and is never the default.
@@ -202,23 +213,26 @@ cargo run -p sealedge-seal-cli -- keygen --out-key device.key --out-pub device.p
 # For CI/automation (unencrypted key file — no passphrase)
 cargo run -p sealedge-seal-cli -- keygen --out-key device.key --out-pub device.pub --unencrypted
 
-# Create archive (generic profile, default; passphrase prompted if key is encrypted)
-cargo run -p sealedge-seal-cli -- wrap --in sample.bin --out archive.seal --device-key device.key --device-pub device.pub
+# Create archive (generic profile; encrypted to the device key by default)
+cargo run -p sealedge-seal-cli -- wrap --in sample.bin --out archive.seal --device-key device.key
 
-# Create archive (cam.video profile)
-cargo run -p sealedge-seal-cli -- wrap --profile cam.video --in sample.bin --out archive.seal --device-key device.key --device-pub device.pub
+# Create archive also readable by an auditor (extra HPKE recipient; repeatable)
+cargo run -p sealedge-seal-cli -- wrap --in sample.bin --out archive.seal --device-key device.key --recipient "x25519:<auditor-pub>"
+
+# Create a signed-but-unencrypted archive (plaintext chunks, no CEK)
+cargo run -p sealedge-seal-cli -- wrap --sign-only --in sample.bin --out archive.seal --device-key device.key
 
 # Create archive (sensor profile with geo)
-cargo run -p sealedge-seal-cli -- wrap --profile sensor --in data.csv --out archive.seal --sample-rate 100 --unit celsius --sensor-model DHT22 --latitude 40.7 --longitude=-74.0 --device-key device.key --device-pub device.pub
+cargo run -p sealedge-seal-cli -- wrap --profile sensor --in data.csv --out archive.seal --sample-rate 100 --unit celsius --sensor-model DHT22 --latitude 40.7 --longitude=-74.0 --device-key device.key
 
-# Verify archive locally
+# Verify archive locally (public-key only; use the ed25519 line from device.pub)
 cargo run -p sealedge-seal-cli -- verify archive.seal --device-pub "ed25519:..."
 
-# Decrypt and recover original data
+# Decrypt and recover original data (any recipient uses its OWN key bundle)
 cargo run -p sealedge-seal-cli -- unwrap archive.seal --device-key device.key --out recovered.bin
 
-# Sign with YubiKey hardware (requires yubikey feature)
-cargo run -p sealedge-seal-cli --features yubikey -- wrap --backend yubikey --in data.bin --out archive.seal --device-key device.key
+# Sign with YubiKey hardware (requires yubikey feature; --sign-only only)
+cargo run -p sealedge-seal-cli --features yubikey -- wrap --backend yubikey --sign-only --in data.bin --out archive.seal --device-key device.key
 
 # Submit to platform server for verification
 cargo run -p sealedge-seal-cli -- emit-request --archive archive.seal --device-pub device.pub --out request.json --post http://localhost:3001/v1/verify

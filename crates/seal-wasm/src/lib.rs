@@ -38,12 +38,34 @@ struct VerificationResult {
     segment_count: u32,
 }
 
+/// The only `.trst` archive version this verifier accepts (C4 clean break).
+const SUPPORTED_TRST_VERSION: &str = "0.2.0";
+
+/// Reject legacy (`0.1.0`) or unknown archive versions with an explicit error.
+fn require_supported_version(trst_version: &str) -> Result<(), JsValue> {
+    if trst_version == SUPPORTED_TRST_VERSION {
+        Ok(())
+    } else if trst_version == "0.1.0" {
+        Err(JsValue::from_str(
+            "unsupported legacy archive format 0.1.0 (pre-C4); re-wrap with a current seal build",
+        ))
+    } else {
+        Err(JsValue::from_str(&format!(
+            "unsupported archive version {trst_version} (expected {SUPPORTED_TRST_VERSION})"
+        )))
+    }
+}
+
 /// Verify a manifest directly from bytes
 #[wasm_bindgen]
 pub fn verify_manifest(manifest_bytes: Vec<u8>, device_pub: String) -> Result<JsValue, JsValue> {
     // Parse the manifest using canonical types from trst-protocols
     let manifest: TrstManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse manifest: {}", e)))?;
+
+    // Version dispatch (C4 §13.4 / M3): reject legacy/unknown formats before the
+    // signature check — canonical bytes differ across versions.
+    require_supported_version(&manifest.trst_version)?;
 
     // Get signature
     let signature_str = manifest
@@ -100,6 +122,9 @@ pub async fn verify_archive(
     // Parse the manifest using canonical types from trst-protocols
     let manifest: TrstManifest = serde_json::from_slice(&manifest_content)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse manifest: {}", e)))?;
+
+    // Version dispatch (C4 §13.4 / M3).
+    require_supported_version(&manifest.trst_version)?;
 
     // Get signature
     let signature_str = manifest

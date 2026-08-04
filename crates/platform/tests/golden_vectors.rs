@@ -47,15 +47,15 @@ fn golden_segment() -> ([u8; 32], [u8; 32]) {
 const GOLDEN_DEVICE_PUB: &str = "ed25519:6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
 
 /// Golden canonical manifest bytes (see module docs).
-const GOLDEN_CANONICAL: &str = r#"{"trst_version":"0.1.0","profile":"generic","device":{"id":"golden-device","model":"TrustEdgeRefCam","firmware_version":"1.0.0","public_key":"ed25519:6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw="},"metadata":{"started_at":"2025-01-15T10:30:00Z","ended_at":"2025-01-15T10:30:02Z"},"chunk":{"size_bytes":4096,"duration_seconds":2},"segments":[{"chunk_file":"00000.bin","blake3_hash":"5071d5d172d041660e12ff5256c8701413d8cf30143fe789e92cf3ec98d7f68d","start_time":"2025-01-15T10:30:00Z","duration_seconds":2,"continuity_hash":"ed914cf2f56043f831dbcf4971dae7b30fc0470fccc4e15b84c1e2137cc19e3b"}],"claims":["location:unknown"]}"#;
+const GOLDEN_CANONICAL: &str = r#"{"trst_version":"0.2.0","profile":"generic","device":{"id":"golden-device","model":"TrustEdgeRefCam","firmware_version":"1.0.0","public_key":"ed25519:6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw="},"metadata":{"started_at":"2025-01-15T10:30:00Z","ended_at":"2025-01-15T10:30:02Z"},"chunk":{"size_bytes":4096,"duration_seconds":2},"segments":[{"chunk_file":"00000.bin","blake3_hash":"5071d5d172d041660e12ff5256c8701413d8cf30143fe789e92cf3ec98d7f68d","start_time":"2025-01-15T10:30:00Z","duration_seconds":2,"continuity_hash":"ed914cf2f56043f831dbcf4971dae7b30fc0470fccc4e15b84c1e2137cc19e3b"}],"claims":["location:unknown"]}"#;
 
 /// Golden Ed25519 signature over [`GOLDEN_CANONICAL`] (see module docs).
-const GOLDEN_SIGNATURE: &str = "ed25519:kw+KRs/AHk6cmkp4VtQIIwyR05Y4E/COR8SAmJgKC8Thq/TflGNzg5hLW3qZ6axVHvno2aOZxY6Ll1cad/w9DQ==";
+const GOLDEN_SIGNATURE: &str = "ed25519:91QUTC/+6bOpEx1I9QuRj9jl3Tl5SYTbTnHm2JQhI3DsdljUaa1wN3WN1r1+8miil0m4rUaT/7njeW0ExjI4Cg==";
 
 /// Build the fixed golden manifest (unsigned).
 fn golden_manifest(public_key: &str) -> TrstManifest {
     TrstManifest {
-        trst_version: "0.1.0".to_string(),
+        trst_version: "0.2.0".to_string(),
         profile: "generic".to_string(),
         device: DeviceInfo {
             id: "golden-device".to_string(),

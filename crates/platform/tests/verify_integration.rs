@@ -65,7 +65,7 @@ fn build_real_signed_manifest_with_key(
     }
 
     let mut manifest = TrstManifest {
-        trst_version: "0.1.0".to_string(),
+        trst_version: "0.2.0".to_string(),
         profile: "generic".to_string(),
         device: DeviceInfo {
             id: device_id.to_string(),
@@ -1502,6 +1502,21 @@ fn test_happy_path_verification() -> Result<()> {
     );
     assert_eq!(report.metadata.chain_tip, expected_tip);
 
+    Ok(())
+}
+
+#[test]
+fn test_rejects_unsupported_version() -> Result<()> {
+    // C4 §13.4 / M3: the platform verifier rejects non-0.2.0 archives outright.
+    let (mut signed_manifest, device_pub) = build_real_signed_manifest("test_device");
+    let segments = matching_segments(&signed_manifest);
+    signed_manifest["trst_version"] = serde_json::json!("0.1.0");
+
+    let err = verify_to_report(&signed_manifest, &segments, &device_pub).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported archive version"),
+        "expected version rejection, got: {err}"
+    );
     Ok(())
 }
 

@@ -130,7 +130,8 @@ platform-server (Rust, Axum HTTP) <-> postgres (internal network, no external po
 **Status**: MITIGATED (v2.2)
 
 **Mitigations**:
-- SEALEDGE-KEY-V1 format: private key encrypted with AES-256-GCM; encryption key derived via PBKDF2-HMAC-SHA256 (600,000 iterations, 32-byte salt per OWASP 2023)
+- SEALEDGE-KEY-V2 bundle (C4): the Ed25519 signing key and the independent X25519 key-agreement key are encrypted together with AES-256-GCM; encryption key derived via PBKDF2-HMAC-SHA256 (600,000 iterations, 32-byte salt per OWASP 2023)
+- **Key separation (C4)**: the signing key is used only for signatures. Compromise of the signing key permits forgery of new archives but does NOT expose the confidentiality of past content (content keys are never derived from it). See T13.
 - Passphrase prompted at runtime via `rpassword` — never stored on disk or in environment variables
 - `--unencrypted` flag available as explicit opt-in for CI/automation environments; requires conscious operator choice
 - Hardware option: YubiKey PIV slot 9c — private key is generated on hardware and never extractable; software only holds the public certificate
@@ -282,6 +283,32 @@ See **RSA Vulnerability History** section for full timeline.
 - `ensure_connected()` is called at the start of every PIV operation — gates all hardware-backed operations
 - 18 simulation tests + 9 hardware integration tests; all tests use real assertions, not placeholder values
 - ECDSA P-256 signing via PIV slot 9c: private key is generated on hardware and is non-exportable by design
+
+---
+
+### T13: Content Confidentiality, Forward Secrecy & Recipient Access (C4)
+
+**Description**: An adversary who later extracts a device key (e.g. flash readout of
+a decommissioned board) attempts to decrypt all previously recorded archives; or a
+provenance consumer (auditor/insurer) needs to read content without gaining the
+power to forge.
+
+**Attack Vectors**: Long-term key exfiltration, decommissioned-hardware readout,
+key sharing for auditing.
+
+**Status**: MITIGATED (C4, `.trst` 0.2.0)
+
+**Mitigations**:
+- **Per-archive random CEK**: chunk content is encrypted under a fresh Content-Encryption Key, never derived from any long-term key.
+- **HPKE (RFC 9180) recipient wrapping with ephemeral sender keys**: the CEK is wrapped to each recipient's X25519 key using `DHKEM(X25519,HKDF-SHA256)`/`HKDF-SHA256`/`ChaCha20Poly1305`, base mode, with a fresh ephemeral per recipient. A later readout of a recipient's X25519 secret exposes only archives wrapped to that recipient, and only the CEKs — the ephemeral private keys are never stored (forward secrecy).
+- **Recipient model**: an auditor decrypts with their own X25519 key and gains no signing/forgery capability. The device is simply recipient #0.
+- **Manifest binding**: the Ed25519 signature covers the whole recipient set, and each HPKE `aad` binds the wrapped CEK to the manifest-without-encryption digest, so a wrapped CEK cannot be transplanted onto another manifest.
+- **Full-identity chunk AAD (M1)**: `BLAKE3("sealedge/aad/v1" || device.public_key || profile || started_at)` — no longer the 48-bit truncated device id.
+
+**Residual risk / out of scope here**:
+- Compromise of a recipient's (incl. the device's) X25519 secret exposes archives wrapped to that key. Mitigation = rotation/revocation (Phase 2; manifest reserves room for a key-epoch).
+- The network transport handshake (`auth.rs`) still uses static-static ECDH from the long-term key — tracked as a separate follow-up.
+- Recipient public keys are visible in the manifest (who-can-read is not private). Acceptable for a provenance product.
 
 ---
 

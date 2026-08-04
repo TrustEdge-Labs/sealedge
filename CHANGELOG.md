@@ -14,6 +14,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note — Pre-v6.0 entries:** Entries below v6.0 describe the project under its former name, **trustedge**. Artifact names, binary names, extensions, and env-var prefixes in those entries refer to what shipped at the time. See `MIGRATION.md` §"v6.0" for the rename map. Entries from v6.0 onward use the current brand, **sealedge**.
 
+## [Unreleased]
+
+### Security (external review — Criticals C1–C4)
+
+- **C1 — Platform `/v1/verify` now verifies real `.seal` archives.** Fixed a double
+  `ed25519:` signature prefix and a canonicalization mismatch; the platform now
+  verifies over `TrstManifest::to_canonical_bytes()` (the exact bytes the CLI signs),
+  and the divergent `VerifyRequest` types are reconciled onto the shared
+  `sealedge-types` definitions. Added end-to-end + golden-vector regression gates.
+- **C2 — Continuity verification binds to the signed manifest.** Fixed an
+  encoding bug that made `chain_tip` a function of segment count alone; the engine
+  now validates the manifest's own BLAKE3 continuity chain and requires the
+  submitted segments to match the signed manifest, and reports real
+  `verified_segments`.
+- **C3 — Honest receipt trust semantics.** JWS `sub` is now the cryptographic
+  signer (`signer_pub`), not client-supplied `device_id`; the verification key
+  must match `manifest.device.public_key`; postgres mode fails closed on unknown
+  device / key mismatch; self-signed attestations are labeled as such.
+- **C4 — Content-encryption redesign (breaking, `.trst` `0.2.0`).** The Ed25519
+  key is now signing-only. Content is encrypted under a per-archive random CEK
+  wrapped to one or more recipients via **HPKE (RFC 9180)** with ephemeral sender
+  keys (forward secrecy). New independent X25519 device key and `SEALEDGE-KEY-V2`
+  dual-key bundle. Auditors decrypt with their own key without gaining signing
+  power. Chunk AAD binds the full device public key. Verifiers (CLI / platform /
+  WASM) reject pre-C4 `0.1.0` archives. See
+  `docs/designs/c4-content-encryption-redesign.md`.
+
+### Changed (breaking)
+- `.trst` archive format bumped to `0.2.0`; `0.1.0` archives are no longer produced
+  or accepted. `seal keygen` now emits a `SEALEDGE-KEY-V2` bundle and a dual-line
+  `.pub`. `seal wrap` gains `--recipient` and `--sign-only`. YubiKey wrap currently
+  requires `--sign-only`.
+
 ## [6.0.0] - 2026-04-22
 
 ### Sealedge Rebrand

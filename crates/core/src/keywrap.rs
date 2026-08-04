@@ -22,8 +22,8 @@
 //!
 //! HPKE suite: `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` / `ChaCha20Poly1305`
 //! (base mode). Pinned via `hpke` 0.12 to match the workspace crypto generation.
-//! Note: this module ADDS the new primitives; the archive path still uses the
-//! legacy [`crate::crypto::derive_chunk_key`] until the CLI switches (C4 Phase 3).
+//! As of C4 Phase 3 the archive path uses these primitives exclusively;
+//! `crate::crypto::derive_chunk_key` is no longer on the content-encryption path.
 
 use aead::{Aead as _, KeyInit as _};
 use aes_gcm::{Aes256Gcm, Nonce as AesGcmNonce};
