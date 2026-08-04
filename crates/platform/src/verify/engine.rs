@@ -12,7 +12,6 @@
 //! No direct blake3 or ed25519_dalek calls remain in this module.
 
 use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 
 /// A segment reference (`{index, hash}`) as it appears on the wire.
@@ -64,24 +63,23 @@ pub fn verify_to_report(
     segments: &[SegmentDigest],
     device_pub: &str,
 ) -> Result<VerifyReport> {
-    let signature_result = verify_signature(manifest, device_pub)?;
-    let continuity_result = verify_continuity(segments)?;
+    // Parse the wire manifest once into the canonical form. Both signature and
+    // continuity verification operate on this — a malformed manifest is a hard
+    // error, not a silent pass.
+    let parsed: sealedge_core::TrstManifest = serde_json::from_value(manifest.clone())
+        .map_err(|e| anyhow!("Manifest does not match the canonical .trst schema: {}", e))?;
 
-    let genesis_hash = compute_genesis_hash();
-    let chain_tip = if segments.is_empty() {
-        genesis_hash.clone()
-    } else {
-        compute_chain_tip(segments)?
-    };
+    let signature_result = verify_signature(&parsed, device_pub)?;
+    let continuity = verify_continuity(&parsed, segments);
 
     Ok(VerifyReport {
         signature_verification: signature_result,
-        continuity_verification: continuity_result,
+        continuity_verification: continuity.result,
         metadata: VerificationMetadata {
-            total_segments: segments.len() as u32,
-            verified_segments: segments.len() as u32,
-            chain_tip,
-            genesis_hash,
+            total_segments: parsed.segments.len() as u32,
+            verified_segments: continuity.verified_segments,
+            chain_tip: continuity.chain_tip,
+            genesis_hash: format_b3(&sealedge_core::chain::genesis()),
         },
     })
 }
@@ -120,7 +118,10 @@ pub fn receipt_from_report(
 ///   prefix (`"ed25519:BASE64"` / `"ecdsa-p256:BASE64"`) and is passed straight
 ///   through to `verify_manifest`. We must NOT re-prepend a prefix here, or the
 ///   value becomes `"ed25519:ed25519:..."` and base64 decoding fails.
-fn verify_signature(manifest: &serde_json::Value, device_pub: &str) -> Result<VerificationResult> {
+fn verify_signature(
+    manifest: &sealedge_core::TrstManifest,
+    device_pub: &str,
+) -> Result<VerificationResult> {
     // device_pub must carry an algorithm prefix — core's verify_manifest
     // dispatches on the signature prefix and expects a matching key format.
     if !device_pub.starts_with("ed25519:") && !device_pub.starts_with("ecdsa-p256:") {
@@ -129,20 +130,14 @@ fn verify_signature(manifest: &serde_json::Value, device_pub: &str) -> Result<Ve
         ));
     }
 
-    // Parse into the canonical manifest so signature verification uses exactly
-    // the same canonicalization the signer used. A manifest that does not match
-    // the .trst schema is an error (not a silent signature failure).
-    let parsed: sealedge_core::TrstManifest = serde_json::from_value(manifest.clone())
-        .map_err(|e| anyhow!("Manifest does not match the canonical .trst schema: {}", e))?;
-
     // The signature travels inside the manifest, already algorithm-prefixed.
-    let signature = parsed
+    let signature = manifest
         .signature
         .as_deref()
         .ok_or_else(|| anyhow!("Missing signature in manifest"))?;
 
     // `to_canonical_bytes()` excludes the signature field, matching the signer.
-    let canonical_bytes = parsed
+    let canonical_bytes = manifest
         .to_canonical_bytes()
         .map_err(|e| anyhow!("Failed to canonicalize manifest: {}", e))?;
 
@@ -162,157 +157,264 @@ fn verify_signature(manifest: &serde_json::Value, device_pub: &str) -> Result<Ve
     }
 }
 
-fn verify_continuity(segments: &[SegmentDigest]) -> Result<VerificationResult> {
-    if segments.is_empty() {
-        return Ok(VerificationResult {
-            passed: true,
-            error: None,
+/// Outcome of continuity verification.
+struct ContinuityOutcome {
+    result: VerificationResult,
+    /// Number of segments actually verified (0 on any failure).
+    verified_segments: u32,
+    /// The chain tip reached ("b3:<hex>"). The genesis hash when nothing verified.
+    chain_tip: String,
+}
+
+impl ContinuityOutcome {
+    fn fail(msg: String) -> Self {
+        Self {
+            result: VerificationResult {
+                passed: false,
+                error: Some(msg),
+            },
+            verified_segments: 0,
+            chain_tip: format_b3(&sealedge_core::chain::genesis()),
+        }
+    }
+}
+
+/// Verify segment continuity against the **signed** manifest.
+///
+/// The manifest signature already covers `manifest.segments` (each carries a
+/// `blake3_hash` and a running `continuity_hash`). This function turns that into
+/// a real, content-bound continuity check with two required parts:
+///
+/// 1. **Bind the client-submitted segments to the signed manifest.** The request
+///    carries its own segment list (the CLI recomputes it by hashing the chunk
+///    files). We require it to have the same length and sequential indices, and
+///    each hash to equal the manifest's `blake3_hash` at that index. Without this
+///    binding, arbitrary segment hashes could ride along on a legitimately-signed
+///    manifest and still report `passed = true` (C2).
+/// 2. **Validate the manifest's own continuity chain.** Delegated to
+///    [`sealedge_core::chain::validate_chain`] — the same routine `seal verify`
+///    uses — which recomputes `chain_next(prev, blake3_hash)` from genesis and
+///    checks it against each stored `continuity_hash`. Hashes are hex-decoded
+///    (the wire format the CLI writes), not base64.
+fn verify_continuity(
+    manifest: &sealedge_core::TrstManifest,
+    client_segments: &[SegmentDigest],
+) -> ContinuityOutcome {
+    use sealedge_core::chain::ChainSegment;
+
+    // Reconstruct the authoritative chain from the signed manifest.
+    let mut chain_segments = Vec::with_capacity(manifest.segments.len());
+    for (i, seg) in manifest.segments.iter().enumerate() {
+        let stored_hash = match decode_b3_hex_32(&seg.blake3_hash) {
+            Some(h) => h,
+            None => {
+                return ContinuityOutcome::fail(format!(
+                    "segment[{}] blake3_hash is not 32-byte hex",
+                    i
+                ))
+            }
+        };
+        let stored_continuity = match decode_b3_hex_32(&seg.continuity_hash) {
+            Some(c) => c,
+            None => {
+                return ContinuityOutcome::fail(format!(
+                    "segment[{}] continuity_hash is not 32-byte hex",
+                    i
+                ))
+            }
+        };
+        chain_segments.push(ChainSegment {
+            index: i,
+            stored_hash,
+            stored_continuity,
         });
     }
 
-    let mut sorted_segments = segments.to_vec();
-    sorted_segments.sort_by_key(|s| s.index);
-
-    for (i, segment) in sorted_segments.iter().enumerate() {
-        if segment.index != i as u32 {
-            return Ok(VerificationResult {
-                passed: false,
-                error: Some(format!("Missing segment at index {}", i)),
-            });
+    // (1) Bind the client-submitted segments to the signed manifest.
+    if client_segments.len() != manifest.segments.len() {
+        return ContinuityOutcome::fail(format!(
+            "submitted {} segments but signed manifest declares {}",
+            client_segments.len(),
+            manifest.segments.len()
+        ));
+    }
+    let mut sorted = client_segments.to_vec();
+    sorted.sort_by_key(|s| s.index);
+    for (i, cs) in sorted.iter().enumerate() {
+        if cs.index as usize != i {
+            return ContinuityOutcome::fail(format!("missing segment at index {}", i));
+        }
+        // Client hashes are "b3:<hex>"; manifest stores bare "<hex>". Normalize both.
+        let client_hash = cs
+            .hash
+            .strip_prefix("b3:")
+            .unwrap_or(&cs.hash)
+            .to_ascii_lowercase();
+        let manifest_hash = manifest.segments[i].blake3_hash.to_ascii_lowercase();
+        if client_hash != manifest_hash {
+            return ContinuityOutcome::fail(format!(
+                "segment[{}] hash does not match the signed manifest",
+                i
+            ));
         }
     }
 
-    let genesis = compute_genesis_hash();
-    let mut chain_value = genesis;
-
-    for segment in &sorted_segments {
-        let hash = segment.hash.strip_prefix("b3:").unwrap_or(&segment.hash);
-        let next_chain = compute_chain_link(&chain_value, hash);
-        chain_value = next_chain;
+    // (2) Validate the manifest's own continuity chain from genesis.
+    match sealedge_core::chain::validate_chain(&chain_segments) {
+        Ok(()) => {
+            let chain_tip = chain_segments
+                .last()
+                .map(|s| format_b3(&s.stored_continuity))
+                .unwrap_or_else(|| format_b3(&sealedge_core::chain::genesis()));
+            ContinuityOutcome {
+                result: VerificationResult {
+                    passed: true,
+                    error: None,
+                },
+                verified_segments: chain_segments.len() as u32,
+                chain_tip,
+            }
+        }
+        Err(e) => ContinuityOutcome::fail(format!("continuity chain invalid: {}", e)),
     }
-
-    Ok(VerificationResult {
-        passed: true,
-        error: None,
-    })
 }
 
-/// Compute the genesis chain hash using sealedge_core's chain module.
+/// Decode a `"b3:<hex>"` (or bare `"<hex>"`) string into 32 raw bytes.
 ///
-/// Uses BASE64 (standard alphabet with padding) to match the existing wire format.
-/// Core's `genesis()` returns the raw `[u8; 32]` BLAKE3 hash bytes, which we
-/// format with the "b3:" prefix and standard base64 encoding.
-fn compute_genesis_hash() -> String {
-    format_b3(&sealedge_core::chain::genesis())
+/// Returns `None` if the hex is malformed or not exactly 32 bytes. Uses hex —
+/// the encoding `seal wrap` writes for `blake3_hash`/`continuity_hash` — not
+/// base64.
+fn decode_b3_hex_32(value: &str) -> Option<[u8; 32]> {
+    let hex_part = value.strip_prefix("b3:").unwrap_or(value);
+    let bytes = hex::decode(hex_part).ok()?;
+    bytes.try_into().ok()
 }
 
-/// Compute a chain link using sealedge_core's chain module.
-fn compute_chain_link(prev: &str, hash: &str) -> String {
-    let prev_clean = prev.strip_prefix("b3:").unwrap_or(prev);
-    let hash_clean = hash.strip_prefix("b3:").unwrap_or(hash);
-
-    let prev_bytes = BASE64.decode(prev_clean).unwrap_or_default();
-    let hash_bytes = BASE64.decode(hash_clean).unwrap_or_default();
-
-    let mut prev_arr = [0u8; 32];
-    let mut hash_arr = [0u8; 32];
-    if prev_bytes.len() == 32 {
-        prev_arr.copy_from_slice(&prev_bytes);
-    }
-    if hash_bytes.len() == 32 {
-        hash_arr.copy_from_slice(&hash_bytes);
-    }
-
-    format_b3(&sealedge_core::chain::chain_next(&prev_arr, &hash_arr))
-}
-
-fn compute_chain_tip(segments: &[SegmentDigest]) -> Result<String> {
-    let mut sorted_segments = segments.to_vec();
-    sorted_segments.sort_by_key(|s| s.index);
-
-    let genesis = compute_genesis_hash();
-    let mut chain_value = genesis;
-
-    for segment in &sorted_segments {
-        let hash = segment.hash.strip_prefix("b3:").unwrap_or(&segment.hash);
-        chain_value = compute_chain_link(&chain_value, hash);
-    }
-
-    Ok(chain_value)
-}
-
-/// Format a 32-byte hash as "b3:BASE64" using the standard base64 alphabet.
-///
-/// Uses the `base64` crate's STANDARD encoder (RFC 4648 with padding) to ensure
-/// consistent output with callers that decode using the same encoder.
+/// Format a 32-byte hash as `"b3:<hex>"`, matching the archive/manifest encoding
+/// (`hex::encode`) that `seal wrap` and `sealedge_core::chain` use.
 fn format_b3(bytes: &[u8; 32]) -> String {
-    format!("b3:{}", BASE64.encode(bytes))
+    format!("b3:{}", hex::encode(bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_genesis_hash_computation() {
-        let genesis = compute_genesis_hash();
-        assert!(genesis.starts_with("b3:"));
+    use sealedge_core::{
+        chain, ChunkInfo, DeviceInfo, GenericMetadata, ProfileMetadata, SegmentInfo, TrstManifest,
+    };
 
-        // Verify using sealedge_core's chain primitives directly
-        let expected_hash = format_b3(&sealedge_core::chain::genesis());
-        assert_eq!(genesis, expected_hash);
+    /// Build a manifest with a valid `n`-segment continuity chain, plus the
+    /// matching client segment list (`b3:<hex>` of each segment hash) that a
+    /// well-behaved client would submit.
+    fn chained_manifest(n: usize) -> (TrstManifest, Vec<SegmentDigest>) {
+        let mut seg_infos = Vec::new();
+        let mut client = Vec::new();
+        let mut prev = chain::genesis();
+        for i in 0..n {
+            let hash = chain::segment_hash(format!("chunk-{i}").as_bytes());
+            let cont = chain::chain_next(&prev, &hash);
+            prev = cont;
+            seg_infos.push(SegmentInfo {
+                chunk_file: format!("{i:05}.bin"),
+                blake3_hash: hex::encode(hash),
+                start_time: format!("segment-{i}"),
+                duration_seconds: 1.0,
+                continuity_hash: hex::encode(cont),
+            });
+            client.push(SegmentDigest {
+                index: i as u32,
+                hash: format!("b3:{}", hex::encode(hash)),
+            });
+        }
+        let manifest = TrstManifest {
+            trst_version: "0.1.0".to_string(),
+            profile: "generic".to_string(),
+            device: DeviceInfo {
+                id: "TEST".to_string(),
+                model: "m".to_string(),
+                firmware_version: "1.0.0".to_string(),
+                public_key: "ed25519:k".to_string(),
+            },
+            metadata: ProfileMetadata::Generic(GenericMetadata {
+                started_at: "t0".to_string(),
+                ended_at: "t1".to_string(),
+                ..Default::default()
+            }),
+            chunk: ChunkInfo {
+                size_bytes: 4096,
+                duration_seconds: 1.0,
+            },
+            segments: seg_infos,
+            claims: vec![],
+            prev_archive_hash: None,
+            signature: None,
+        };
+        (manifest, client)
     }
 
     #[test]
-    fn test_chain_link_computation() {
-        let prev = "b3:abc123";
-        let hash = "b3:def456";
-        let result = compute_chain_link(prev, hash);
-        assert!(result.starts_with("b3:"));
+    fn test_format_and_decode_b3_roundtrip() {
+        let bytes = chain::genesis();
+        let formatted = format_b3(&bytes);
+        assert!(formatted.starts_with("b3:"));
+        assert_eq!(decode_b3_hex_32(&formatted), Some(bytes));
+        // Bare hex (manifest form) also decodes.
+        assert_eq!(decode_b3_hex_32(&hex::encode(bytes)), Some(bytes));
+        // Base64 (the old, wrong encoding) must NOT decode as valid hex bytes.
+        assert_eq!(decode_b3_hex_32("b3:not-hex!!"), None);
     }
 
     #[test]
-    fn test_continuity_verification_empty() {
-        let segments = vec![];
-        let result = verify_continuity(&segments).unwrap();
-        assert!(result.passed);
+    fn test_continuity_matches_signed_manifest() {
+        let (manifest, client) = chained_manifest(3);
+        let outcome = verify_continuity(&manifest, &client);
+        assert!(outcome.result.passed);
+        assert_eq!(outcome.verified_segments, 3);
+        // chain_tip must be the manifest's last continuity_hash, not a function
+        // of segment count alone.
+        let expected_tip = format!("b3:{}", manifest.segments[2].continuity_hash);
+        assert_eq!(outcome.chain_tip, expected_tip);
     }
 
     #[test]
-    fn test_continuity_verification_sequential() {
-        let segments = vec![
-            SegmentDigest {
-                index: 0,
-                hash: "b3:hash0".to_string(),
-            },
-            SegmentDigest {
-                index: 1,
-                hash: "b3:hash1".to_string(),
-            },
-            SegmentDigest {
-                index: 2,
-                hash: "b3:hash2".to_string(),
-            },
-        ];
-        let result = verify_continuity(&segments).unwrap();
-        assert!(result.passed);
+    fn test_continuity_rejects_arbitrary_client_hashes() {
+        // C2 exploit: attach arbitrary segment hashes to a signed manifest.
+        let (manifest, mut client) = chained_manifest(2);
+        client[1].hash =
+            "b3:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        let outcome = verify_continuity(&manifest, &client);
+        assert!(
+            !outcome.result.passed,
+            "client hashes that differ from the signed manifest must fail"
+        );
+        assert_eq!(outcome.verified_segments, 0);
     }
 
     #[test]
-    fn test_continuity_verification_missing_segment() {
-        let segments = vec![
-            SegmentDigest {
-                index: 0,
-                hash: "b3:hash0".to_string(),
-            },
-            SegmentDigest {
-                index: 2,
-                hash: "b3:hash2".to_string(),
-            },
-        ];
-        let result = verify_continuity(&segments).unwrap();
-        assert!(!result.passed);
-        assert!(result.error.is_some());
+    fn test_continuity_rejects_segment_count_mismatch() {
+        let (manifest, client) = chained_manifest(3);
+        let outcome = verify_continuity(&manifest, &client[..2]);
+        assert!(!outcome.result.passed);
+    }
+
+    #[test]
+    fn test_continuity_rejects_broken_manifest_chain() {
+        // A signed manifest whose stored continuity_hash is wrong must fail.
+        let (mut manifest, client) = chained_manifest(2);
+        manifest.segments[1].continuity_hash =
+            "1111111111111111111111111111111111111111111111111111111111111111".to_string();
+        let outcome = verify_continuity(&manifest, &client);
+        assert!(!outcome.result.passed);
+    }
+
+    #[test]
+    fn test_continuity_empty_manifest_and_client() {
+        let (manifest, client) = chained_manifest(0);
+        let outcome = verify_continuity(&manifest, &client);
+        assert!(outcome.result.passed);
+        assert_eq!(outcome.verified_segments, 0);
+        assert_eq!(outcome.chain_tip, format_b3(&chain::genesis()));
     }
 
     #[test]

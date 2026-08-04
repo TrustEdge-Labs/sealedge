@@ -44,8 +44,25 @@ fn build_real_signed_manifest_with_key(
     device_id: &str,
 ) -> (serde_json::Value, String) {
     use sealedge_core::{
-        ChunkInfo, DeviceInfo, GenericMetadata, ProfileMetadata, SegmentInfo, TrstManifest,
+        chain, ChunkInfo, DeviceInfo, GenericMetadata, ProfileMetadata, SegmentInfo, TrstManifest,
     };
+
+    // Build a real 2-segment continuity chain exactly as `seal wrap` does:
+    // blake3_hash = hex(segment_hash(bytes)); continuity_hash = hex(chain_next(prev, hash)).
+    let mut seg_infos = Vec::new();
+    let mut prev = chain::genesis();
+    for i in 0..2u32 {
+        let hash = chain::segment_hash(format!("{device_id}-chunk-{i}").as_bytes());
+        let cont = chain::chain_next(&prev, &hash);
+        prev = cont;
+        seg_infos.push(SegmentInfo {
+            chunk_file: format!("{i:05}.bin"),
+            blake3_hash: hex::encode(hash),
+            start_time: format!("segment-{i}"),
+            duration_seconds: 2.0,
+            continuity_hash: hex::encode(cont),
+        });
+    }
 
     let mut manifest = TrstManifest {
         trst_version: "0.1.0".to_string(),
@@ -65,13 +82,7 @@ fn build_real_signed_manifest_with_key(
             size_bytes: 4096,
             duration_seconds: 2.0,
         },
-        segments: vec![SegmentInfo {
-            chunk_file: "00000.bin".to_string(),
-            blake3_hash: "b3:00".to_string(),
-            start_time: "2025-01-15T10:30:00Z".to_string(),
-            duration_seconds: 2.0,
-            continuity_hash: "b3:00".to_string(),
-        }],
+        segments: seg_infos,
         claims: vec!["location:unknown".to_string()],
         prev_archive_hash: None,
         signature: None,
@@ -85,12 +96,20 @@ fn build_real_signed_manifest_with_key(
     (serde_json::to_value(&manifest).unwrap(), device_pub)
 }
 
-/// A single valid segment reference (index 0) for continuity checks.
-fn single_segment() -> Vec<SegmentDigest> {
-    vec![SegmentDigest {
-        index: 0,
-        hash: "b3:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-    }]
+/// Derive the client segment list (`b3:<hex>` per index) that a well-behaved
+/// client submits — i.e. exactly the manifest's own `blake3_hash` values. This
+/// is what `seal emit-request` produces by hashing the chunk files.
+fn matching_segments(manifest: &serde_json::Value) -> Vec<SegmentDigest> {
+    manifest["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(i, seg)| SegmentDigest {
+            index: i as u32,
+            hash: format!("b3:{}", seg["blake3_hash"].as_str().unwrap()),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -141,20 +160,22 @@ mod http_tests {
     }
 
     /// Build a valid VerifyRequest body as JSON bytes.
+    ///
+    /// Segments are derived from the manifest so they bind to the signed content
+    /// (post-C2 the platform rejects segments that don't match the manifest).
     fn build_verify_body(
         signed_manifest: &serde_json::Value,
         device_pub: &str,
         return_receipt: bool,
     ) -> Vec<u8> {
+        let segments: Vec<_> = super::matching_segments(signed_manifest)
+            .into_iter()
+            .map(|s| json!({ "index": s.index, "hash": s.hash }))
+            .collect();
         let body = json!({
             "device_pub": device_pub,
             "manifest": signed_manifest,
-            "segments": [
-                {
-                    "index": 0,
-                    "hash": "b3:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-                }
-            ],
+            "segments": segments,
             "options": {
                 "return_receipt": return_receipt,
                 "device_id": "test-device"
@@ -1396,24 +1417,10 @@ mod http_tests {
 // Pure crypto tests (no feature gates required)
 // ---------------------------------------------------------------------------
 
-// Two valid 64-hex BLAKE3 segment hashes used across the pure-crypto tests.
-const HASH_A: &str = "b3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const HASH_B: &str = "b3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
 #[test]
 fn test_happy_path_verification() -> Result<()> {
     let (signed_manifest, device_pub) = build_real_signed_manifest("test_device");
-
-    let segments = vec![
-        SegmentDigest {
-            index: 0,
-            hash: HASH_A.to_string(),
-        },
-        SegmentDigest {
-            index: 1,
-            hash: HASH_B.to_string(),
-        },
-    ];
+    let segments = matching_segments(&signed_manifest);
 
     let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
 
@@ -1421,6 +1428,15 @@ fn test_happy_path_verification() -> Result<()> {
     assert!(report.continuity_verification.passed);
     assert_eq!(report.metadata.total_segments, 2);
     assert_eq!(report.metadata.verified_segments, 2);
+    // chain_tip must be the manifest's real last continuity_hash (C2), not a
+    // function of segment count alone.
+    let expected_tip = format!(
+        "b3:{}",
+        signed_manifest["segments"][1]["continuity_hash"]
+            .as_str()
+            .unwrap()
+    );
+    assert_eq!(report.metadata.chain_tip, expected_tip);
 
     Ok(())
 }
@@ -1431,9 +1447,9 @@ fn test_tampered_manifest_fails_signature() -> Result<()> {
     // fail signature verification — the recomputed canonical bytes no longer
     // match the signature.
     let (mut signed_manifest, device_pub) = build_real_signed_manifest("test_device");
+    let segments = matching_segments(&signed_manifest);
     signed_manifest["device"]["id"] = serde_json::json!("tampered-device");
 
-    let segments = single_segment();
     let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
 
     assert!(
@@ -1446,19 +1462,35 @@ fn test_tampered_manifest_fails_signature() -> Result<()> {
 }
 
 #[test]
-fn test_tampered_segment_verification() -> Result<()> {
+fn test_arbitrary_client_segments_fail_continuity() -> Result<()> {
+    // C2 live exploit: attach arbitrary segment hashes to a legitimately-signed
+    // manifest. The platform must NOT report continuity passed.
     let (signed_manifest, device_pub) = build_real_signed_manifest("test_device");
+    let mut segments = matching_segments(&signed_manifest);
+    segments[1].hash =
+        "b3:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
 
-    let segments = vec![
-        SegmentDigest {
-            index: 0,
-            hash: HASH_A.to_string(),
-        },
-        SegmentDigest {
-            index: 2, // Skipped index 1 — continuity failure
-            hash: HASH_B.to_string(),
-        },
-    ];
+    let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
+
+    assert!(
+        report.signature_verification.passed,
+        "the manifest itself is validly signed"
+    );
+    assert!(
+        !report.continuity_verification.passed,
+        "segments that don't match the signed manifest must fail continuity (C2)"
+    );
+    assert_eq!(report.metadata.verified_segments, 0);
+
+    Ok(())
+}
+
+#[test]
+fn test_tampered_segment_verification() -> Result<()> {
+    // A gap in the submitted segment indices must fail continuity.
+    let (signed_manifest, device_pub) = build_real_signed_manifest("test_device");
+    let mut segments = matching_segments(&signed_manifest);
+    segments[1].index = 2; // gap at index 1
 
     let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
 
@@ -1473,9 +1505,8 @@ fn test_tampered_segment_verification() -> Result<()> {
 fn test_wrong_key_verification() -> Result<()> {
     // Manifest signed by one key, verified against a different public key.
     let (signed_manifest, _correct_pub) = build_real_signed_manifest("test_device");
+    let segments = matching_segments(&signed_manifest);
     let wrong_key = sealedge_core::DeviceKeypair::generate().unwrap();
-
-    let segments = single_segment();
 
     let report = verify_to_report(&signed_manifest, &segments, &wrong_key.public)?;
 
@@ -1487,7 +1518,10 @@ fn test_wrong_key_verification() -> Result<()> {
 }
 
 #[test]
-fn test_empty_segments_verification() -> Result<()> {
+fn test_empty_segments_rejected() -> Result<()> {
+    // Submitting no segments for a manifest that declares segments must fail
+    // continuity (count mismatch) — post-C2 the client list must bind to the
+    // signed manifest.
     let (signed_manifest, device_pub) = build_real_signed_manifest("test_device");
 
     let segments = vec![];
@@ -1495,8 +1529,11 @@ fn test_empty_segments_verification() -> Result<()> {
     let report = verify_to_report(&signed_manifest, &segments, &device_pub)?;
 
     assert!(report.signature_verification.passed);
-    assert!(report.continuity_verification.passed);
-    assert_eq!(report.metadata.total_segments, 0);
+    assert!(
+        !report.continuity_verification.passed,
+        "empty segments must not verify against a 2-segment signed manifest"
+    );
+    assert_eq!(report.metadata.total_segments, 2);
     assert_eq!(report.metadata.verified_segments, 0);
 
     Ok(())

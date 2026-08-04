@@ -25,7 +25,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use sealedge_core::{
-    ChunkInfo, DeviceInfo, DeviceKeypair, GenericMetadata, ProfileMetadata, SegmentInfo,
+    chain, ChunkInfo, DeviceInfo, DeviceKeypair, GenericMetadata, ProfileMetadata, SegmentInfo,
     TrstManifest,
 };
 use sealedge_platform::verify::engine::{verify_to_report, SegmentDigest};
@@ -35,14 +35,22 @@ fn golden_keypair() -> DeviceKeypair {
     DeviceKeypair::import_secret(&format!("ed25519:{}", BASE64.encode([7u8; 32]))).unwrap()
 }
 
+/// The fixed segment hash / continuity hash for the single golden segment.
+/// Deterministic: `segment_hash(b"golden-chunk-0")` chained from genesis.
+fn golden_segment() -> ([u8; 32], [u8; 32]) {
+    let hash = chain::segment_hash(b"golden-chunk-0");
+    let cont = chain::chain_next(&chain::genesis(), &hash);
+    (hash, cont)
+}
+
 /// The fixed device public key derived from [`golden_keypair`].
 const GOLDEN_DEVICE_PUB: &str = "ed25519:6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
 
 /// Golden canonical manifest bytes (see module docs).
-const GOLDEN_CANONICAL: &str = r#"{"trst_version":"0.1.0","profile":"generic","device":{"id":"golden-device","model":"TrustEdgeRefCam","firmware_version":"1.0.0","public_key":"ed25519:6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw="},"metadata":{"started_at":"2025-01-15T10:30:00Z","ended_at":"2025-01-15T10:30:02Z"},"chunk":{"size_bytes":4096,"duration_seconds":2},"segments":[{"chunk_file":"00000.bin","blake3_hash":"b3:00","start_time":"2025-01-15T10:30:00Z","duration_seconds":2,"continuity_hash":"b3:00"}],"claims":["location:unknown"]}"#;
+const GOLDEN_CANONICAL: &str = r#"{"trst_version":"0.1.0","profile":"generic","device":{"id":"golden-device","model":"TrustEdgeRefCam","firmware_version":"1.0.0","public_key":"ed25519:6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw="},"metadata":{"started_at":"2025-01-15T10:30:00Z","ended_at":"2025-01-15T10:30:02Z"},"chunk":{"size_bytes":4096,"duration_seconds":2},"segments":[{"chunk_file":"00000.bin","blake3_hash":"5071d5d172d041660e12ff5256c8701413d8cf30143fe789e92cf3ec98d7f68d","start_time":"2025-01-15T10:30:00Z","duration_seconds":2,"continuity_hash":"ed914cf2f56043f831dbcf4971dae7b30fc0470fccc4e15b84c1e2137cc19e3b"}],"claims":["location:unknown"]}"#;
 
 /// Golden Ed25519 signature over [`GOLDEN_CANONICAL`] (see module docs).
-const GOLDEN_SIGNATURE: &str = "ed25519:oyKgd6SUXDpzqn/SNUqiW5ZPzZao9MkfPQbEDrk2sNVCoNvwvGawCh0vFO76aHSnv6ItB9uuwvGYMQ+ZYvmsCw==";
+const GOLDEN_SIGNATURE: &str = "ed25519:kw+KRs/AHk6cmkp4VtQIIwyR05Y4E/COR8SAmJgKC8Thq/TflGNzg5hLW3qZ6axVHvno2aOZxY6Ll1cad/w9DQ==";
 
 /// Build the fixed golden manifest (unsigned).
 fn golden_manifest(public_key: &str) -> TrstManifest {
@@ -64,13 +72,16 @@ fn golden_manifest(public_key: &str) -> TrstManifest {
             size_bytes: 4096,
             duration_seconds: 2.0,
         },
-        segments: vec![SegmentInfo {
-            chunk_file: "00000.bin".to_string(),
-            blake3_hash: "b3:00".to_string(),
-            start_time: "2025-01-15T10:30:00Z".to_string(),
-            duration_seconds: 2.0,
-            continuity_hash: "b3:00".to_string(),
-        }],
+        segments: {
+            let (hash, cont) = golden_segment();
+            vec![SegmentInfo {
+                chunk_file: "00000.bin".to_string(),
+                blake3_hash: hex::encode(hash),
+                start_time: "2025-01-15T10:30:00Z".to_string(),
+                duration_seconds: 2.0,
+                continuity_hash: hex::encode(cont),
+            }]
+        },
         claims: vec!["location:unknown".to_string()],
         prev_archive_hash: None,
         signature: None,
@@ -115,9 +126,10 @@ fn golden_vector_verifies_through_platform_engine() {
     manifest.set_signature(signature);
 
     let manifest_value = serde_json::to_value(&manifest).unwrap();
+    let (hash, _cont) = golden_segment();
     let segments = vec![SegmentDigest {
         index: 0,
-        hash: "b3:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+        hash: format!("b3:{}", hex::encode(hash)),
     }];
 
     let report = verify_to_report(&manifest_value, &segments, &keypair.public).unwrap();
@@ -126,5 +138,8 @@ fn golden_vector_verifies_through_platform_engine() {
         report.signature_verification.passed,
         "golden vector must verify through the real platform engine"
     );
-    assert!(report.continuity_verification.passed);
+    assert!(
+        report.continuity_verification.passed,
+        "golden vector continuity must verify against the signed manifest"
+    );
 }

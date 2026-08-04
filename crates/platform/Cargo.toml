@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
+hex = "0.4"
 chrono = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
@@ -54,7 +55,6 @@ spki = { version = "0.7", optional = true }
 pkcs8 = { version = "0.10", optional = true }
 x509-cert = { version = "0.2", optional = true }
 const-oid = { version = "0.9", optional = true }
-hex = { version = "0.4", optional = true }
 
 # Feature-gated: http
 axum = { workspace = true, optional = true }
@@ -68,7 +68,7 @@ ipnet = { version = "2", optional = true }
 [features]
 default = []
 postgres = ["dep:sqlx", "dep:bcrypt", "dep:sha2", "dep:dotenvy"]
-ca = ["dep:x509-parser", "dep:der", "dep:spki", "dep:pkcs8", "dep:x509-cert", "dep:const-oid", "dep:hex"]
+ca = ["dep:x509-parser", "dep:der", "dep:spki", "dep:pkcs8", "dep:x509-cert", "dep:const-oid"]
 yubikey = ["ca", "sealedge-core/yubikey"]
 http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tokio", "dep:utoipa-swagger-ui", "dep:sha2", "dep:dotenvy", "dep:governor", "dep:ipnet"]
 test-utils = []
