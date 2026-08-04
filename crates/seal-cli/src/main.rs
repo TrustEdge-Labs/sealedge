@@ -21,11 +21,13 @@ use clap::{Args, Parser, Subcommand};
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use sealedge_core::{
-    chain_next, decrypt_segment, derive_chunk_key, encrypt_segment, generate_aad, genesis,
-    is_encrypted_key_file, read_archive, segment_hash, sign_manifest, validate_archive,
-    verify_manifest, write_archive, AudioMetadata, CamVideoMetadata, ChunkInfo, DeviceInfo,
-    DeviceKeypair, GenericMetadata, LogMetadata, PointAttestation, ProfileMetadata, SegmentInfo,
-    SensorMetadata, TrstManifest,
+    cek_wrap_info, chain_next, chunk_aad_v2, decrypt_segment, encrypt_segment, genesis,
+    hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng, is_encrypted_key_file, read_archive,
+    recipient_id, seeded_test_rng, segment_hash, sign_manifest, validate_archive, verify_manifest,
+    write_archive, AudioMetadata, CamVideoMetadata, ChunkInfo, ContentKey, DeviceBundle,
+    DeviceInfo, DeviceKeypair, EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata,
+    PointAttestation, ProfileMetadata, RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest,
+    CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
 };
 use serde::Serialize;
 use std::time::Instant;
@@ -212,6 +214,13 @@ struct WrapCmd {
     /// Accept plaintext key files without passphrase prompt (for CI/automation only)
     #[arg(long)]
     unencrypted: bool,
+    /// Additional recipient X25519 public key(s) ("x25519:<base64>") that may
+    /// decrypt this archive. The device key is always recipient #0. Repeatable.
+    #[arg(long = "recipient", value_name = "X25519_PUB")]
+    recipients: Vec<String>,
+    /// Produce a signed-but-unencrypted archive (plaintext chunks, no CEK).
+    #[arg(long = "sign-only")]
+    sign_only: bool,
 }
 
 #[derive(Args, Debug)]
@@ -430,14 +439,13 @@ fn handle_keygen(args: KeygenCmd) -> Result<()> {
         );
     }
 
-    let device_keypair = DeviceKeypair::generate()?;
+    // C4: a device now has an Ed25519 signing key AND an independent X25519
+    // key-agreement key, persisted together as a SEALEDGE-KEY-V2 bundle.
+    let bundle = DeviceBundle::generate()?;
 
     if args.unencrypted {
-        fs::write(
-            &args.out_key,
-            format!("{}\n", device_keypair.export_secret()),
-        )
-        .with_context(|| format!("Failed to write secret key: {}", args.out_key.display()))?;
+        fs::write(&args.out_key, format!("{}\n", bundle.to_plaintext()))
+            .with_context(|| format!("Failed to write secret key: {}", args.out_key.display()))?;
     } else {
         let passphrase =
             rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?;
@@ -446,9 +454,9 @@ fn handle_keygen(args: KeygenCmd) -> Result<()> {
         if passphrase != confirm {
             anyhow::bail!("Passphrases do not match");
         }
-        let encrypted = device_keypair
-            .export_secret_encrypted(&passphrase)
-            .context("Failed to encrypt key")?;
+        let encrypted = bundle
+            .export_encrypted(&passphrase)
+            .context("Failed to encrypt key bundle")?;
         fs::write(&args.out_key, &encrypted)
             .with_context(|| format!("Failed to write secret key: {}", args.out_key.display()))?;
     }
@@ -468,12 +476,154 @@ fn handle_keygen(args: KeygenCmd) -> Result<()> {
         );
     }
 
-    fs::write(&args.out_pub, format!("{}\n", device_keypair.public))
+    // Public file carries both keys, one per line: ed25519:...\nx25519:...\n
+    fs::write(&args.out_pub, bundle.public_lines())
         .with_context(|| format!("Failed to write public key: {}", args.out_pub.display()))?;
 
     println!("Generated device key: {}", args.out_key.display());
     println!("Generated device pub: {}", args.out_pub.display());
     Ok(())
+}
+
+/// Load a `SEALEDGE-KEY-V2` device bundle from a file (encrypted or, with
+/// `unencrypted`, plaintext). A legacy V1 (`SEALEDGE-KEY-V1` / bare `ed25519:`)
+/// key is rejected with an actionable error — content encryption (C4) needs the
+/// X25519 key that only V2 bundles carry.
+fn load_bundle(path: &Path, unencrypted: bool) -> Result<DeviceBundle> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read device key '{}'", path.display()))?;
+
+    if bytes.starts_with(b"SEALEDGE-KEY-V2\n") {
+        if unencrypted {
+            anyhow::bail!("Cannot use --unencrypted with an encrypted key bundle");
+        }
+        let passphrase =
+            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?;
+        return DeviceBundle::import_encrypted(&bytes, &passphrase)
+            .map_err(|e| anyhow::anyhow!("Failed to decrypt key bundle: {}", e));
+    }
+
+    if unencrypted {
+        let contents = String::from_utf8_lossy(&bytes);
+        if let Ok(bundle) = DeviceBundle::from_plaintext(contents.trim()) {
+            return Ok(bundle);
+        }
+    }
+
+    if is_encrypted_key_file(&bytes) || bytes.starts_with(b"ed25519:") {
+        anyhow::bail!(
+            "Legacy V1 key file detected. C4 archives need a V2 key bundle (Ed25519 + X25519). \
+             Run `seal keygen` to generate a new SEALEDGE-KEY-V2 bundle."
+        );
+    }
+
+    anyhow::bail!("Unrecognized key file format (expected SEALEDGE-KEY-V2)")
+}
+
+/// Load only the Ed25519 signing key from a key file. Prefers a `SEALEDGE-KEY-V2`
+/// bundle (returning its signing key) and falls back to a legacy V1 key file.
+/// Used by operations that sign but do not encrypt (e.g. `attest-sbom`).
+fn load_signing_keypair(path: &Path, unencrypted: bool) -> Result<DeviceKeypair> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("failed to read device key '{}'", path.display()))?;
+
+    if bytes.starts_with(b"SEALEDGE-KEY-V2\n") {
+        if unencrypted {
+            anyhow::bail!("Cannot use --unencrypted with an encrypted key bundle");
+        }
+        let passphrase =
+            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?;
+        return DeviceBundle::import_encrypted(&bytes, &passphrase)
+            .map(|b| b.signing)
+            .map_err(|e| anyhow::anyhow!("Failed to decrypt key bundle: {}", e));
+    }
+
+    if unencrypted {
+        let contents = String::from_utf8_lossy(&bytes);
+        if let Ok(bundle) = DeviceBundle::from_plaintext(contents.trim()) {
+            return Ok(bundle.signing);
+        }
+        return DeviceKeypair::import_secret(contents.trim())
+            .map_err(|e| anyhow::anyhow!("Failed to import key: {}", e));
+    }
+
+    if is_encrypted_key_file(&bytes) {
+        let passphrase = rpassword::prompt_password("Enter passphrase for device key: ")
+            .context("Failed to read passphrase")?;
+        return DeviceKeypair::import_secret_encrypted(&bytes, &passphrase)
+            .map_err(|e| anyhow::anyhow!("Failed to decrypt key: {}", e));
+    }
+
+    anyhow::bail!("Key file is not encrypted. Use --unencrypted to bypass.")
+}
+
+/// Load an existing V2 bundle, or generate one and write `device.key` +
+/// `device.pub` when no path is supplied. Returns `(bundle, key_path, pub_path,
+/// generated)`.
+fn load_or_generate_bundle(
+    path: Option<&Path>,
+    unencrypted: bool,
+) -> Result<(DeviceBundle, PathBuf, PathBuf, bool)> {
+    match path {
+        Some(existing) => {
+            let bundle = load_bundle(existing, unencrypted)?;
+            let public_path = existing.with_extension("pub");
+            Ok((bundle, existing.to_path_buf(), public_path, false))
+        }
+        None => {
+            let bundle = DeviceBundle::generate()?;
+            let secret_path = PathBuf::from("device.key");
+            let public_path = PathBuf::from("device.pub");
+            if unencrypted {
+                fs::write(&secret_path, format!("{}\n", bundle.to_plaintext()))?;
+            } else {
+                let passphrase = rpassword::prompt_password("Passphrase: ")
+                    .context("Failed to read passphrase")?;
+                let confirm = rpassword::prompt_password("Confirm passphrase: ")
+                    .context("Failed to read passphrase confirmation")?;
+                if passphrase != confirm {
+                    anyhow::bail!("Passphrases do not match");
+                }
+                let encrypted = bundle
+                    .export_encrypted(&passphrase)
+                    .context("Failed to encrypt key bundle")?;
+                fs::write(&secret_path, &encrypted)?;
+            }
+            #[cfg(unix)]
+            {
+                let perms = std::fs::Permissions::from_mode(0o600);
+                std::fs::set_permissions(&secret_path, perms).with_context(|| {
+                    format!("Failed to set permissions on {}", secret_path.display())
+                })?;
+            }
+            fs::write(&public_path, bundle.public_lines())?;
+            Ok((bundle, secret_path, public_path, true))
+        }
+    }
+}
+
+/// Version dispatch (M3): accept only supported archive formats, rejecting both
+/// legacy `0.1.0` and unknown versions with explicit errors — before any
+/// signature check, because canonical bytes differ across versions.
+fn require_supported_version(trst_version: &str) -> Result<()> {
+    match trst_version {
+        "0.2.0" => Ok(()),
+        "0.1.0" => anyhow::bail!(
+            "unsupported legacy archive format 0.1.0 (pre-C4); re-wrap with a current seal build"
+        ),
+        other => anyhow::bail!("unsupported archive version {other}; upgrade the seal tool"),
+    }
+}
+
+/// Extract the `started_at` timestamp from any profile's metadata.
+fn manifest_started_at(manifest: &TrstManifest) -> String {
+    match &manifest.metadata {
+        ProfileMetadata::CamVideo(m) => m.started_at.clone(),
+        ProfileMetadata::Sensor(m) => m.started_at.clone(),
+        ProfileMetadata::Audio(m) => m.started_at.clone(),
+        ProfileMetadata::Log(m) => m.started_at.clone(),
+        ProfileMetadata::Generic(m) => m.started_at.clone(),
+    }
 }
 
 fn handle_wrap(args: WrapCmd) -> Result<()> {
@@ -492,13 +642,64 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
 
     // Validate backend-specific requirements up front
     if args.backend == "yubikey" && args.device_key.is_none() {
+        anyhow::bail!("--device-key is required with --backend yubikey");
+    }
+    // C4: content encryption binds the chunk AAD and HPKE info to the signing
+    // key. For yubikey that key lives on hardware (not the device X25519 key we
+    // wrap to), so encrypted+yubikey is deferred — require --sign-only there.
+    if args.backend == "yubikey" && !args.sign_only {
         anyhow::bail!(
-            "--device-key is required with --backend yubikey (used for chunk encryption)"
+            "--backend yubikey currently requires --sign-only (C4 content encryption is software-backend only)"
         );
     }
 
-    let (device_keypair, secret_path, public_path, generated) =
-        load_or_generate_keypair(args.device_key.as_deref(), args.unencrypted)?;
+    let (bundle, secret_path, public_path, generated) =
+        load_or_generate_bundle(args.device_key.as_deref(), args.unencrypted)?;
+
+    // Resolve the signing public key up front: it goes into the manifest, the
+    // chunk AAD, and the HPKE info binding (M1). Software uses the bundle's
+    // Ed25519 key; yubikey reads it from hardware and keeps a handle to sign
+    // the finished manifest below.
+    #[cfg(feature = "yubikey")]
+    let mut yk_backend: Option<(YubiKeyBackend, String)> = None;
+    let signing_public_key: String = match args.backend.as_str() {
+        "software" => bundle.signing.public.clone(),
+        "yubikey" => {
+            #[cfg(feature = "yubikey")]
+            {
+                let pin =
+                    rpassword::prompt_password("YubiKey PIN: ").context("Failed to read PIN")?;
+                let config = YubiKeyConfig::builder()
+                    .pin(pin)
+                    .default_slot(args.slot.clone())
+                    .build();
+                let backend = YubiKeyBackend::with_config(config)
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to YubiKey: {}", e))?;
+                let pub_key_result = backend
+                    .perform_operation(&args.slot, CryptoOperation::GetPublicKey)
+                    .map_err(|e| anyhow::anyhow!("Failed to get YubiKey public key: {}", e))?;
+                let der_bytes = match pub_key_result {
+                    CryptoResult::PublicKey(b) => b,
+                    _ => anyhow::bail!("Unexpected result from GetPublicKey"),
+                };
+                let p256_pub = p256::PublicKey::from_public_key_der(&der_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse P-256 public key: {}", e))?;
+                let sec1_bytes = p256_pub.to_sec1_bytes();
+                let pub_key_str = format!(
+                    "ecdsa-p256:{}",
+                    base64::engine::general_purpose::STANDARD.encode(sec1_bytes.as_ref())
+                );
+                yk_backend = Some((backend, args.slot.clone()));
+                pub_key_str
+            }
+            #[cfg(not(feature = "yubikey"))]
+            {
+                anyhow::bail!("YubiKey support requires building with --features yubikey");
+            }
+        }
+        other => anyhow::bail!("Unknown backend '{}'. Use 'software' or 'yubikey'", other),
+    };
+    let device_id = pub_key_to_device_id(&signing_public_key)?;
 
     // Read input file
     let input_data = fs::read(&args.input)
@@ -528,6 +729,9 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         Some(seed) => Box::new(ChaCha20Rng::seed_from_u64(seed)),
         None => Box::new(rand::rng()),
     };
+    // Separate rand_core-0.6 CSPRNG for the CEK + HPKE ephemerals so a seeded
+    // wrap is byte-deterministic (M2). None ⇒ production OsRng path.
+    let mut seed_rng = args.seed.map(seeded_test_rng);
 
     // Resolve chunk_seconds: cam.video default 2.0, generic default 0.0
     let chunk_seconds = match args.profile.as_str() {
@@ -541,10 +745,6 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
     let mut chain_state = genesis();
     let mut encrypted_chunks = Vec::new();
 
-    // Derive encryption key from device signing key via HKDF-SHA256.
-    // For yubikey backend, the software device key is still used for chunk encryption.
-    let encryption_key = derive_chunk_key(device_keypair.secret_bytes());
-
     // Create timestamp for all operations - deterministic if seeded
     let started_at = if args.seed.is_some() {
         // Use deterministic timestamp for seeded runs
@@ -553,28 +753,39 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         current_timestamp()?
     };
 
-    // Compute device_id from the initial software public key (will be overridden for yubikey
-    // after we obtain the hardware public key below)
-    let initial_pub_str = &device_keypair.public;
-    let device_id = pub_key_to_device_id(initial_pub_str)?;
+    // C4: a per-archive random CEK keys the chunk AEAD (deterministic in seed
+    // mode via seed_rng). --sign-only leaves chunks in plaintext (no CEK).
+    let cek: Option<ContentKey> = if args.sign_only {
+        None
+    } else if let Some(rng) = seed_rng.as_mut() {
+        Some(ContentKey::from_rng(rng))
+    } else {
+        Some(ContentKey::generate())
+    };
+    // Chunk AAD binds ciphertext to the full signing identity (M1).
+    let chunk_aad = chunk_aad_v2(&signing_public_key, &args.profile, &started_at);
 
     for (i, chunk_data) in chunks.iter().enumerate() {
         let chunk_id = i as u32;
 
-        // Generate nonce - seeded if provided
-        let nonce = generate_seeded_nonce24(&mut *rng);
-        let aad = generate_aad("0.1.0", &args.profile, &device_id, &started_at);
-        let encrypted_data = encrypt_segment(&encryption_key, &nonce, chunk_data, &aad)?;
+        // Encrypted mode: on-disk chunk is [nonce:24][ciphertext]. Sign-only mode
+        // stores the plaintext chunk directly.
+        let stored_chunk = match cek.as_ref() {
+            Some(cek) => {
+                let nonce = generate_seeded_nonce24(&mut *rng);
+                let key = chacha20poly1305::Key::from_slice(cek.as_bytes());
+                let ct = encrypt_segment(key, &nonce, chunk_data, &chunk_aad)?;
+                let mut c = Vec::with_capacity(24 + ct.len());
+                c.extend_from_slice(&nonce);
+                c.extend_from_slice(&ct);
+                c
+            }
+            None => chunk_data.to_vec(),
+        };
 
-        // Prepend the 24-byte nonce to the ciphertext so unwrap can decrypt:
-        // on-disk format is [nonce:24][ciphertext:N]
-        let mut chunk_with_nonce = Vec::with_capacity(24 + encrypted_data.len());
-        chunk_with_nonce.extend_from_slice(&nonce);
-        chunk_with_nonce.extend_from_slice(&encrypted_data);
-
-        // Hash nonce+ciphertext to match what validate_archive reads from disk
-        let hash = segment_hash(&chunk_with_nonce);
-        encrypted_chunks.push(chunk_with_nonce);
+        // Hash the stored bytes to match what validate_archive reads from disk.
+        let hash = segment_hash(&stored_chunk);
+        encrypted_chunks.push(stored_chunk);
         let next_state = chain_next(&chain_state, &hash);
 
         // Build start_time: time-based for cam.video, index-based for generic
@@ -699,138 +910,17 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         }
     };
 
-    // Determine signing public key string and signature based on backend
-    let (signing_public_key, signature) = match args.backend.as_str() {
-        "software" => {
-            let pub_key = device_keypair.public.clone();
-            let canonical_bytes = {
-                // Build a temporary manifest to get canonical bytes for signing
-                let tmp = TrstManifest {
-                    trst_version: "0.1.0".to_string(),
-                    profile: args.profile.clone(),
-                    device: DeviceInfo {
-                        id: device_id.clone(),
-                        model: "TrustEdgeRefCam".to_string(),
-                        firmware_version: "1.0.0".to_string(),
-                        public_key: pub_key.clone(),
-                        key_agreement_public: None,
-                    },
-                    metadata: metadata.clone(),
-                    chunk: ChunkInfo {
-                        size_bytes: args.chunk_size as u64,
-                        duration_seconds: chunk_seconds,
-                    },
-                    segments: segments.clone(),
-                    claims: vec!["location:unknown".to_string()],
-                    encryption: None,
-                    prev_archive_hash: None,
-                    signature: None,
-                };
-                tmp.to_canonical_bytes()?
-            };
-            let sig = sign_manifest(&device_keypair, &canonical_bytes)?;
-            (pub_key, sig)
-        }
-        "yubikey" => {
-            #[cfg(feature = "yubikey")]
-            {
-                // Prompt for PIN interactively without echoing
-                let pin =
-                    rpassword::prompt_password("YubiKey PIN: ").context("Failed to read PIN")?;
-                let config = YubiKeyConfig::builder()
-                    .pin(pin)
-                    .default_slot(args.slot.clone())
-                    .build();
-                let backend = YubiKeyBackend::with_config(config)
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to YubiKey: {}", e))?;
-
-                // Extract public key from hardware slot (DER-encoded SPKI)
-                let pub_key_result = backend
-                    .perform_operation(&args.slot, CryptoOperation::GetPublicKey)
-                    .map_err(|e| anyhow::anyhow!("Failed to get YubiKey public key: {}", e))?;
-                let der_bytes = match pub_key_result {
-                    CryptoResult::PublicKey(b) => b,
-                    _ => anyhow::bail!("Unexpected result from GetPublicKey"),
-                };
-
-                // Parse SPKI DER to SEC1 uncompressed point bytes
-                let p256_pub = p256::PublicKey::from_public_key_der(&der_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse P-256 public key: {}", e))?;
-                let sec1_bytes = p256_pub.to_sec1_bytes();
-                let pub_key_str = format!(
-                    "ecdsa-p256:{}",
-                    base64::engine::general_purpose::STANDARD.encode(sec1_bytes.as_ref())
-                );
-
-                // Build canonical bytes with the P-256 public key and updated device_id
-                let yk_device_id = pub_key_to_device_id(&pub_key_str)?;
-                let canonical_bytes = {
-                    let tmp = TrstManifest {
-                        trst_version: "0.1.0".to_string(),
-                        profile: args.profile.clone(),
-                        device: DeviceInfo {
-                            id: yk_device_id,
-                            model: "TrustEdgeRefCam".to_string(),
-                            firmware_version: "1.0.0".to_string(),
-                            public_key: pub_key_str.clone(),
-                            key_agreement_public: None,
-                        },
-                        metadata: metadata.clone(),
-                        chunk: ChunkInfo {
-                            size_bytes: args.chunk_size as u64,
-                            duration_seconds: chunk_seconds,
-                        },
-                        segments: segments.clone(),
-                        claims: vec!["location:unknown".to_string()],
-                        encryption: None,
-                        prev_archive_hash: None,
-                        signature: None,
-                    };
-                    tmp.to_canonical_bytes()?
-                };
-
-                // Sign with YubiKey hardware (ECDSA P-256)
-                let sign_result = backend
-                    .perform_operation(
-                        &args.slot,
-                        CryptoOperation::Sign {
-                            data: canonical_bytes,
-                            algorithm: SignatureAlgorithm::EcdsaP256,
-                        },
-                    )
-                    .map_err(|e| anyhow::anyhow!("YubiKey signing failed: {}", e))?;
-                let sig_bytes = match sign_result {
-                    CryptoResult::Signed(b) => b,
-                    _ => anyhow::bail!("Unexpected result from Sign operation"),
-                };
-                let sig_str = format!(
-                    "ecdsa-p256:{}",
-                    base64::engine::general_purpose::STANDARD.encode(&sig_bytes)
-                );
-
-                (pub_key_str, sig_str)
-            }
-            #[cfg(not(feature = "yubikey"))]
-            {
-                anyhow::bail!("YubiKey support requires building with --features yubikey");
-            }
-        }
-        other => anyhow::bail!("Unknown backend '{}'. Use 'software' or 'yubikey'", other),
-    };
-
-    // Recompute device_id from the final signing public key (handles yubikey override)
-    let final_device_id = pub_key_to_device_id(&signing_public_key)?;
-
-    // Build the TrstManifest with the final public key and device_id
-    let signed_manifest = TrstManifest {
-        trst_version: "0.1.0".to_string(),
+    // Build the 0.2.0 manifest (unsigned), wrap the CEK to recipients, then sign.
+    let ka_pub = bundle.key_agreement.public_string();
+    let mut manifest = TrstManifest {
+        trst_version: "0.2.0".to_string(),
         profile: args.profile.clone(),
         device: DeviceInfo {
-            id: final_device_id,
+            id: device_id.clone(),
             model: "TrustEdgeRefCam".to_string(),
             firmware_version: "1.0.0".to_string(),
-            public_key: signing_public_key,
-            key_agreement_public: None,
+            public_key: signing_public_key.clone(),
+            key_agreement_public: Some(ka_pub.clone()),
         },
         metadata,
         chunk: ChunkInfo {
@@ -841,17 +931,93 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         claims: vec!["location:unknown".to_string()],
         encryption: None,
         prev_archive_hash: None,
-        signature: Some(signature.clone()),
+        signature: None,
     };
+
+    // Encrypted mode: HPKE-wrap the CEK to each recipient. The HPKE aad binds
+    // each wrapped CEK to the manifest-without-encryption digest, so a wrapped
+    // CEK cannot be transplanted onto a different manifest (design §7).
+    if let Some(cek) = cek.as_ref() {
+        let pre_digest = segment_hash(&manifest.to_canonical_bytes()?);
+        let info = cek_wrap_info(&signing_public_key, &manifest.trst_version);
+
+        // Recipient #0 is always the device's own key-agreement key; then any
+        // --recipient keys (deduplicated, order-stable).
+        let mut recipient_pubs = vec![ka_pub.clone()];
+        for r in &args.recipients {
+            if !recipient_pubs.contains(r) {
+                recipient_pubs.push(r.clone());
+            }
+        }
+
+        let mut recipients = Vec::with_capacity(recipient_pubs.len());
+        for pub_str in &recipient_pubs {
+            let (enc, wrapped_cek) = match seed_rng.as_mut() {
+                Some(rng) => hpke_seal_cek_with_rng(rng, pub_str, &info, &pre_digest, cek)?,
+                None => hpke_seal_cek(pub_str, &info, &pre_digest, cek)?,
+            };
+            recipients.push(RecipientEntry {
+                recipient_id: recipient_id(pub_str)?,
+                recipient_pub: pub_str.clone(),
+                enc,
+                wrapped_cek,
+            });
+        }
+
+        manifest.encryption = Some(EncryptionBlock {
+            content_aead: CONTENT_AEAD_ID.to_string(),
+            hpke: HpkeSuite {
+                kem: HPKE_KEM_ID.to_string(),
+                kdf: HPKE_KDF_ID.to_string(),
+                aead: HPKE_AEAD_ID.to_string(),
+            },
+            recipients,
+        });
+    } else if !args.recipients.is_empty() {
+        anyhow::bail!(
+            "--recipient cannot be combined with --sign-only (sign-only archives are unencrypted)"
+        );
+    }
+
+    // Sign the finished manifest's canonical bytes.
+    let canonical_bytes = manifest.to_canonical_bytes()?;
+    let signature = match args.backend.as_str() {
+        "software" => sign_manifest(&bundle.signing, &canonical_bytes)?,
+        "yubikey" => {
+            #[cfg(feature = "yubikey")]
+            {
+                let (backend, slot) = yk_backend.as_ref().expect("yubikey backend resolved above");
+                let sign_result = backend
+                    .perform_operation(
+                        slot,
+                        CryptoOperation::Sign {
+                            data: canonical_bytes,
+                            algorithm: SignatureAlgorithm::EcdsaP256,
+                        },
+                    )
+                    .map_err(|e| anyhow::anyhow!("YubiKey signing failed: {}", e))?;
+                let sig_bytes = match sign_result {
+                    CryptoResult::Signed(b) => b,
+                    _ => anyhow::bail!("Unexpected result from Sign operation"),
+                };
+                format!(
+                    "ecdsa-p256:{}",
+                    base64::engine::general_purpose::STANDARD.encode(&sig_bytes)
+                )
+            }
+            #[cfg(not(feature = "yubikey"))]
+            {
+                unreachable!("yubikey backend rejected earlier without the feature")
+            }
+        }
+        _ => unreachable!("backend validated above"),
+    };
+
+    manifest.set_signature(signature.clone());
 
     // Write archive
     let detached_sig = signature.as_bytes();
-    write_archive(
-        &args.output,
-        &signed_manifest,
-        encrypted_chunks,
-        detached_sig,
-    )?;
+    write_archive(&args.output, &manifest, encrypted_chunks, detached_sig)?;
 
     let result = WrapResult {
         output_dir: args.output,
@@ -911,6 +1077,19 @@ fn handle_verify(args: VerifyCmd) -> Result<()> {
             .into());
         }
     };
+
+    // Version dispatch (M3): reject legacy/unknown formats with an explicit error
+    // before touching the signature (canonical bytes differ across versions).
+    if let Err(e) = require_supported_version(&manifest.trst_version) {
+        report.error = Some(e.to_string());
+        report.verify_time_ms = start_time.elapsed().as_millis() as u64;
+        output_error(&args, &report, "Unsupported archive version")?;
+        return Err(CliExitError {
+            code: 12,
+            message: e.to_string(),
+        }
+        .into());
+    }
 
     // Parse device public key: pass through recognized prefixes, default bare keys to ed25519
     let device_pub_key =
@@ -1038,33 +1217,25 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     if args.unencrypted {
         warn_unencrypted();
     }
-    // Load device keypair from file
-    let key_bytes = fs::read(&args.device_key)
-        .with_context(|| format!("failed to read device key '{}'", args.device_key.display()))?;
-    let device_keypair = if is_encrypted_key_file(&key_bytes) {
-        let passphrase =
-            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?;
-        DeviceKeypair::import_secret_encrypted(&key_bytes, &passphrase)
-            .map_err(|e| anyhow::anyhow!("Failed to decrypt key: {}", e))?
-    } else if args.unencrypted {
-        let contents = String::from_utf8_lossy(&key_bytes).trim().to_string();
-        DeviceKeypair::import_secret(&contents)
-            .map_err(|e| anyhow::anyhow!("Failed to import key: {}", e))?
-    } else {
-        anyhow::bail!("Key file is not encrypted. Use --unencrypted to bypass.");
-    };
+    // Load the recipient's V2 key bundle (device owner OR an auditor/insurer).
+    let bundle = load_bundle(&args.device_key, args.unencrypted)?;
 
     // Read archive
     let (manifest, chunks) = read_archive(&args.archive)
         .with_context(|| format!("Failed to read archive: {}", args.archive.display()))?;
 
-    // Verify signature BEFORE any decryption
+    // Version dispatch (M3) before any signature check.
+    require_supported_version(&manifest.trst_version)?;
+
+    // Verify signature against the manifest's OWN device.public_key (the signer).
+    // The party unwrapping may be a recipient other than the device, so we do NOT
+    // verify against the unwrapping key.
     let signature = manifest
         .signature
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Archive has no signature"))?;
     let canonical_bytes = manifest.to_canonical_bytes()?;
-    let sig_valid = verify_manifest(&device_keypair.public, &canonical_bytes, signature)?;
+    let sig_valid = verify_manifest(&manifest.device.public_key, &canonical_bytes, signature)?;
     if !sig_valid {
         eprintln!("Signature: FAIL");
         return Err(CliExitError {
@@ -1086,48 +1257,73 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     }
     eprintln!("Continuity: PASS");
 
-    // Derive chunk key from device signing key via HKDF-SHA256
-    let encryption_key = derive_chunk_key(device_keypair.secret_bytes());
-
-    // Extract started_at from metadata for AAD reconstruction
-    let started_at = match &manifest.metadata {
-        ProfileMetadata::CamVideo(m) => m.started_at.clone(),
-        ProfileMetadata::Sensor(m) => m.started_at.clone(),
-        ProfileMetadata::Audio(m) => m.started_at.clone(),
-        ProfileMetadata::Log(m) => m.started_at.clone(),
-        ProfileMetadata::Generic(m) => m.started_at.clone(),
-    };
-
-    // Decrypt chunks in order and reassemble
-    let aad = generate_aad(
-        &manifest.trst_version,
-        &manifest.profile,
-        &manifest.device.id,
-        &started_at,
-    );
+    // Recover content. Sign-only archives store plaintext chunks; encrypted
+    // archives require HPKE-opening the CEK with our recipient key.
     let mut output_data: Vec<u8> = Vec::new();
-
-    for (index, chunk_bytes) in &chunks {
-        if chunk_bytes.len() < 24 {
-            anyhow::bail!(
-                "Chunk {:05} too short to contain nonce ({} bytes)",
-                index,
-                chunk_bytes.len()
-            );
+    match &manifest.encryption {
+        None => {
+            // Sign-only: chunks are stored as plaintext.
+            for (_index, chunk_bytes) in &chunks {
+                output_data.extend_from_slice(chunk_bytes);
+            }
         }
-        let nonce: [u8; 24] = chunk_bytes[..24].try_into().unwrap();
-        let ciphertext = &chunk_bytes[24..];
-        let plaintext =
-            decrypt_segment(&encryption_key, &nonce, ciphertext, &aad).map_err(|e| {
-                CliExitError {
-                    code: 1,
-                    message: format!(
-                        "Decryption failed — wrong device key or corrupted archive: {}",
-                        e
-                    ),
-                }
+        Some(enc) => {
+            // Find the recipient entry matching our X25519 key.
+            let my_pub = bundle.key_agreement.public_string();
+            let entry = enc
+                .recipients
+                .iter()
+                .find(|r| r.recipient_pub == my_pub)
+                .ok_or_else(|| anyhow::anyhow!("This key is not a recipient of the archive"))?;
+
+            // Recompute the HPKE aad = digest of the manifest WITHOUT its
+            // encryption block (must match what wrap sealed against, design §7).
+            let pre_digest = {
+                let mut pre = manifest.clone();
+                pre.encryption = None;
+                segment_hash(&pre.to_canonical_bytes()?)
+            };
+            let info = cek_wrap_info(&manifest.device.public_key, &manifest.trst_version);
+            let cek = hpke_open_cek(
+                &bundle.key_agreement,
+                &entry.enc,
+                &info,
+                &pre_digest,
+                &entry.wrapped_cek,
+            )
+            .map_err(|e| CliExitError {
+                code: 1,
+                message: format!("Failed to unwrap content key: {}", e),
             })?;
-        output_data.extend_from_slice(&plaintext);
+
+            let key = chacha20poly1305::Key::from_slice(cek.as_bytes());
+            let started_at = manifest_started_at(&manifest);
+            let chunk_aad =
+                chunk_aad_v2(&manifest.device.public_key, &manifest.profile, &started_at);
+
+            for (index, chunk_bytes) in &chunks {
+                if chunk_bytes.len() < 24 {
+                    anyhow::bail!(
+                        "Chunk {:05} too short to contain nonce ({} bytes)",
+                        index,
+                        chunk_bytes.len()
+                    );
+                }
+                let nonce: [u8; 24] = chunk_bytes[..24].try_into().unwrap();
+                let ciphertext = &chunk_bytes[24..];
+                let plaintext =
+                    decrypt_segment(key, &nonce, ciphertext, &chunk_aad).map_err(|e| {
+                        CliExitError {
+                            code: 1,
+                            message: format!(
+                                "Decryption failed — wrong key or corrupted archive: {}",
+                                e
+                            ),
+                        }
+                    })?;
+                output_data.extend_from_slice(&plaintext);
+            }
+        }
     }
 
     // Write output file
@@ -1226,76 +1422,6 @@ fn output_continuity_error(args: &VerifyCmd, report: &VerifyReport) -> Result<()
 // Removed: extract_gap_index() function eliminated string parsing
 // Gap index information should come from structured error types, not string parsing
 
-fn load_or_generate_keypair(
-    path: Option<&Path>,
-    unencrypted: bool,
-) -> Result<(DeviceKeypair, PathBuf, PathBuf, bool)> {
-    match path {
-        Some(existing) => {
-            let key_bytes = fs::read(existing)
-                .with_context(|| format!("failed to read device key '{}'", existing.display()))?;
-            let device_keypair = if is_encrypted_key_file(&key_bytes) {
-                if unencrypted {
-                    anyhow::bail!("Cannot use --unencrypted with an encrypted key file");
-                }
-                let passphrase = rpassword::prompt_password("Passphrase: ")
-                    .context("Failed to read passphrase")?;
-                DeviceKeypair::import_secret_encrypted(&key_bytes, &passphrase)
-                    .map_err(|e| anyhow::anyhow!("Failed to decrypt key: {}", e))?
-            } else if unencrypted {
-                let contents = String::from_utf8_lossy(&key_bytes).trim().to_string();
-                DeviceKeypair::import_secret(&contents)
-                    .map_err(|e| anyhow::anyhow!("Failed to import key: {}", e))?
-            } else {
-                anyhow::bail!("Key file is not encrypted. Use --unencrypted to bypass.");
-            };
-            let public_path = existing.with_extension("pub");
-            Ok((device_keypair, existing.to_path_buf(), public_path, false))
-        }
-        None => {
-            let device_keypair = DeviceKeypair::generate()?;
-            let secret_path = PathBuf::from("device.key");
-            let public_path = PathBuf::from("device.pub");
-            if unencrypted {
-                let secret_string = device_keypair.export_secret();
-                let public_string = device_keypair.public.clone();
-                fs::write(&secret_path, format!("{secret_string}\n"))?;
-                fs::write(&public_path, format!("{public_string}\n"))?;
-            } else {
-                let passphrase = rpassword::prompt_password("Passphrase: ")
-                    .context("Failed to read passphrase")?;
-                let confirm = rpassword::prompt_password("Confirm passphrase: ")
-                    .context("Failed to read passphrase confirmation")?;
-                if passphrase != confirm {
-                    anyhow::bail!("Passphrases do not match");
-                }
-                let encrypted = device_keypair
-                    .export_secret_encrypted(&passphrase)
-                    .context("Failed to encrypt key")?;
-                fs::write(&secret_path, &encrypted)?;
-                let public_string = device_keypair.public.clone();
-                fs::write(&public_path, format!("{public_string}\n"))?;
-            }
-            // Set secret key file to owner-only permissions (0600)
-            #[cfg(unix)]
-            {
-                let perms = std::fs::Permissions::from_mode(0o600);
-                std::fs::set_permissions(&secret_path, perms).with_context(|| {
-                    format!("Failed to set permissions on {}", secret_path.display())
-                })?;
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!(
-                    "Warning: Unable to restrict key file permissions on this platform. Manually restrict access to {}",
-                    secret_path.display()
-                );
-            }
-            Ok((device_keypair, secret_path, public_path, true))
-        }
-    }
-}
-
 fn current_timestamp() -> Result<String> {
     let now: DateTime<Utc> = Utc::now();
     Ok(now.to_rfc3339_opts(SecondsFormat::Secs, true))
@@ -1320,14 +1446,20 @@ async fn handle_emit_request(args: EmitRequestCmd) -> Result<()> {
         });
     }
 
-    // Load device pub from file
+    // Load device pub from file. A V2 .pub carries two lines (ed25519 + x25519);
+    // the platform verifies the Ed25519 signing key, so select that line.
     let device_pub_content = fs::read_to_string(&args.device_pub).with_context(|| {
         format!(
             "Failed to read device pub file: {}",
             args.device_pub.display()
         )
     })?;
-    let device_pub = device_pub_content.trim().to_string();
+    let device_pub = device_pub_content
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| l.starts_with("ed25519:"))
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| device_pub_content.trim().to_string());
 
     // Build VerifyRequest using shared sealedge_types::verification::VerifyRequest.
     // TrstManifest is serialized to serde_json::Value for compatibility with the shared type.
@@ -1435,21 +1567,9 @@ fn handle_attest_sbom(args: AttestSbomCmd) -> Result<()> {
         .into());
     }
 
-    // Load device keypair
-    let key_bytes = fs::read(&args.device_key)
-        .with_context(|| format!("failed to read device key '{}'", args.device_key.display()))?;
-    let device_keypair = if args.unencrypted {
-        let contents = String::from_utf8_lossy(&key_bytes).trim().to_string();
-        DeviceKeypair::import_secret(&contents)
-            .map_err(|e| anyhow::anyhow!("Failed to import key: {}", e))?
-    } else if is_encrypted_key_file(&key_bytes) {
-        let passphrase = rpassword::prompt_password("Enter passphrase for device key: ")
-            .context("Failed to read passphrase")?;
-        DeviceKeypair::import_secret_encrypted(&key_bytes, &passphrase)
-            .map_err(|e| anyhow::anyhow!("Failed to decrypt key: {}", e))?
-    } else {
-        anyhow::bail!("Key file is not encrypted. Use --unencrypted to bypass.");
-    };
+    // Load the signing keypair. Attestations only need the Ed25519 signing key;
+    // accept a V2 bundle (preferred) and fall back to a legacy V1 key file.
+    let device_keypair = load_signing_keypair(&args.device_key, args.unencrypted)?;
 
     // Create attestation
     let attestation =

@@ -33,7 +33,7 @@ use hpke::{
     Kem as KemTrait, OpModeR, OpModeS, Serializable,
 };
 use pbkdf2::pbkdf2_hmac;
-use rand_core::{OsRng, RngCore};
+use rand_core::{CryptoRng, OsRng, RngCore, SeedableRng};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret as XSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -135,8 +135,14 @@ pub struct ContentKey([u8; 32]);
 impl ContentKey {
     /// Generate a fresh random 32-byte CEK from the OS CSPRNG.
     pub fn generate() -> Self {
+        Self::from_rng(&mut OsRng)
+    }
+
+    /// Generate a CEK from a caller-provided RNG. In seed/test mode this makes the
+    /// CEK deterministic (M2); production passes `OsRng` via [`ContentKey::generate`].
+    pub fn from_rng<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
         let mut k = [0u8; 32];
-        OsRng.fill_bytes(&mut k);
+        rng.fill_bytes(&mut k);
         Self(k)
     }
 
@@ -181,6 +187,19 @@ pub fn hpke_seal_cek(
     aad: &[u8],
     cek: &ContentKey,
 ) -> Result<(String, String), CryptoError> {
+    hpke_seal_cek_with_rng(&mut OsRng, recipient_public, info, aad, cek)
+}
+
+/// [`hpke_seal_cek`] with a caller-supplied RNG. Seed/test mode passes a
+/// deterministic RNG (see [`seeded_test_rng`]) so the ephemeral — and thus the
+/// whole archive — is byte-reproducible (M2). Production uses `OsRng`.
+pub fn hpke_seal_cek_with_rng<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    recipient_public: &str,
+    info: &[u8],
+    aad: &[u8],
+    cek: &ContentKey,
+) -> Result<(String, String), CryptoError> {
     let pk_bytes = parse_x25519_bytes(recipient_public)?;
     let pk = <HpkeKem as KemTrait>::PublicKey::from_bytes(&pk_bytes)
         .map_err(|e| CryptoError::EncryptionFailed(format!("HPKE recipient key: {e}")))?;
@@ -191,11 +210,21 @@ pub fn hpke_seal_cek(
         info,
         cek.as_bytes(),
         aad,
-        &mut OsRng,
+        rng,
     )
     .map_err(|e| CryptoError::EncryptionFailed(format!("HPKE seal: {e}")))?;
 
     Ok((BASE64.encode(enc.to_bytes()), BASE64.encode(ciphertext)))
+}
+
+/// A deterministic rand_core-0.6 CSPRNG for **seed/test mode only** (never
+/// production). Drives the CEK and HPKE ephemerals so a `--seed` wrap is
+/// byte-for-byte reproducible (M2). `rand_chacha` 0.3 matches hpke 0.12's
+/// rand_core generation.
+pub fn seeded_test_rng(seed: u64) -> rand_chacha::ChaCha20Rng {
+    let mut s = [0u8; 32];
+    s[..8].copy_from_slice(&seed.to_le_bytes());
+    rand_chacha::ChaCha20Rng::from_seed(s)
 }
 
 /// HPKE-open a wrapped CEK with the recipient's X25519 secret.

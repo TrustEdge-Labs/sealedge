@@ -60,6 +60,9 @@ hkdf = { workspace = true }
 # workspace RustCrypto generation (rand_core 0.6, x25519-dalek 2, aes-gcm 0.10,
 # chacha 0.10, sha2 0.10) — avoids pulling a duplicate crypto-crate generation.
 hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }
+# rand_core-0.6-compatible ChaCha CSPRNG for deterministic seed/test mode HPKE
+# (M2). Matches hpke 0.12's rand_core generation; already in the lockfile.
+rand_chacha = "0.3"
 keyring = { workspace = true, optional = true }
 num-traits = { workspace = true }
 p256 = { workspace = true, features = ["ecdh"] }

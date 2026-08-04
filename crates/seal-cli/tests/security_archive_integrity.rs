@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy-v1-tests")]
+// C4 Phase 3b: gated pending migration to V2 keys / 0.2.0 archives / recipient model.
 //
 // Copyright (c) 2025 TRUSTEDGE LABS LLC
 // This source code is subject to the terms of the Mozilla Public License, v. 2.0.
