@@ -40,7 +40,7 @@ Sealedge implements **mutual authentication** using Ed25519 digital signatures w
 ✅ **Session Isolation**: Each connection gets unique, time-limited session with unique encryption key
 ✅ **Replay Protection**: Challenge-response protocol prevents replay attacks
 ✅ **Channel Binding**: Both public keys mixed into KDF prevent unknown-key-share attacks
-✅ **Forward Security**: Sessions expire automatically with configurable timeouts
+✅ **Forward Security**: Sessions expire automatically after a fixed 30-minute timeout
 
 [↑ Back to top](#table-of-contents)
 
@@ -56,21 +56,22 @@ Sealedge implements **mutual authentication** using Ed25519 digital signatures w
   --listen 127.0.0.1:8080 \
   --require-auth \
   --server-identity "My Secure Server" \
-  --decrypt \
-  --use-keyring \
-  --salt-hex $(openssl rand -hex 16)
+  --decrypt
 ```
 
 **Client:**
 ```bash
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input my_file.txt \
-  --require-auth \
+  --file my_file.txt \
+  --enable-auth \
   --client-identity "My Client App" \
-  --use-keyring \
-  --salt-hex <same-salt-as-server>
+  --server-cert sealedge-server.cert
 ```
+
+> With authentication enabled the session key is derived via X25519 ECDH during
+> the handshake, so no `--key-hex`, `--use-keyring`, or shared salt is needed for
+> the encrypted transfer.
 
 ### First Run Experience
 
@@ -151,9 +152,9 @@ sequenceDiagram
         S->>S: Sign client challenge with server key
         S->>SM: Create new session
         SM->>SM: Generate cryptographic session ID (64-bit)
-        SM->>SM: Set session timeout (default: 300s)
+        SM->>SM: Set session timeout (1800s)
         SM-->>S: Session created
-        S->>C: Session Established<br/>{"session_id": "0x...", "challenge_response": "...", "timeout": 300}
+        S->>C: Session Established<br/>{"session_id": "0x...", "challenge_response": "...", "timeout": 1800}
     end
     
     C->>C: Verify server's client challenge response
@@ -183,7 +184,7 @@ sequenceDiagram
         C->>S: Transfer complete
         S->>SM: Mark session complete
     else Timeout or error
-        SM->>SM: Session timeout (300s)
+        SM->>SM: Session timeout (1800s)
         SM->>SM: Clean up expired session
     end
 ```
@@ -275,18 +276,17 @@ Sealedge certificates contain:
 
 # Custom client certificate path
 ./target/release/sealedge-client \
-  --require-auth \
-  --client-key ~/.config/sealedge/mobile-app.key \
+  --enable-auth \
+  --client-cert ~/.config/sealedge/mobile-app.cert \
   --client-identity "Executive Mobile App v2.1"
 
-# Creates:
-~/.config/sealedge/mobile-app.key   # Private key file
-~/.config/sealedge/mobile-app.cert  # Certificate file
+# Creates (generated on first use if missing):
+~/.config/sealedge/mobile-app.cert  # Certificate file (identity + public key)
 ```
 
 **Client Certificate Generation Process:**
 
-1. **Check for Existing Certificate**: Client looks for `--client-key` path or `./sealedge-client.key`
+1. **Check for Existing Certificate**: Client looks for `--client-cert` path or `./sealedge-client.cert`
 2. **Generate Ed25519 Key Pair**: If missing, creates new 256-bit private key
 3. **Create Self-Signed Certificate**: Binds client identity to public key
 4. **Write to Filesystem**: Saves both private key and certificate files
@@ -363,9 +363,9 @@ chmod 644 ~/.config/sealedge/mobile-app.cert
   --server-key ./certificates/production_server.key
 
 ./target/release/sealedge-client \
-  --require-auth \
+  --enable-auth \
   --client-identity "Mobile App v2.1" \
-  --client-key ./certificates/mobile_client.key
+  --client-cert ./certificates/mobile_client.cert
 ```
 
 ### Certificate Security
@@ -392,17 +392,17 @@ chmod 644 ~/.config/sealedge/mobile-app.cert
 5. **Validation**: All requests validated against active session
 6. **Cleanup**: Expired sessions automatically removed; key material zeroized
 
-### Session Configuration
+### Session Duration
+
+The session timeout is a fixed 30 minutes (1800 seconds), defined by the
+`SESSION_TIMEOUT` constant in `crates/core/src/auth.rs`. It is not configurable
+via a CLI flag. When a session expires, the client simply re-authenticates and a
+fresh ECDH session key is derived.
 
 ```bash
-# Custom session timeout (600 seconds = 10 minutes)
+# Authenticated server (sessions expire after 1800s automatically)
 ./target/release/sealedge-server \
-  --require-auth \
-  --session-timeout 600 \
-  --server-identity "Long Session Server"
-
-# Default timeout (300 seconds = 5 minutes)
-./target/release/sealedge-server \
+  --listen 127.0.0.1:8080 \
   --require-auth \
   --server-identity "Standard Server"
 ```
@@ -425,17 +425,19 @@ chmod 644 ~/.config/sealedge/mobile-app.cert
 #### Server Options
 | Option | Required | Description | Example |
 |--------|----------|-------------|---------|
-| `--require-auth` | Yes | Enable authentication requirement | `--require-auth` |
+| `--require-auth` | Yes | Enable mutual authentication | `--require-auth` |
 | `--server-identity` | Recommended | Server identity for certificates | `--server-identity "Production Server"` |
 | `--server-key` | Optional | Path to server signing key | `--server-key ./server.key` |
-| `--session-timeout` | Optional | Session timeout in seconds [default: 300] | `--session-timeout 600` |
+
+The session timeout is fixed at 1800 seconds and is not configurable via a flag.
 
 #### Client Options  
 | Option | Required | Description | Example |
 |--------|----------|-------------|---------|
-| `--require-auth` | Yes | Enable authentication | `--require-auth` |
+| `--enable-auth` | Yes | Enable authentication + server cert verification | `--enable-auth` |
 | `--client-identity` | Recommended | Client identity for certificates | `--client-identity "Mobile App v1.0"` |
-| `--client-key` | Optional | Path to client signing key | `--client-key ./client.key` |
+| `--client-cert` | Optional | Path to client certificate file | `--client-cert ./client.cert` |
+| `--server-cert` | Optional | Path to trusted server certificate | `--server-cert ./server.cert` |
 
 ### Configuration Examples
 
@@ -447,7 +449,6 @@ chmod 644 ~/.config/sealedge/mobile-app.cert
   --require-auth \
   --server-identity "Sealedge Production v2.1" \
   --server-key /etc/sealedge/server.key \
-  --session-timeout 180 \  # 3 minutes
   --decrypt \
   --use-keyring \
   --output-dir /secure/uploads
@@ -455,14 +456,12 @@ chmod 644 ~/.config/sealedge/mobile-app.cert
 
 #### Development Environment
 ```bash
-# Development server with longer sessions
+# Development server
 ./target/release/sealedge-server \
   --listen 127.0.0.1:8080 \
   --require-auth \
   --server-identity "Development Server" \
-  --session-timeout 1800 \  # 30 minutes
-  --decrypt \
-  --key-hex "dev_key_for_testing_only"
+  --decrypt
 ```
 
 [↑ Back to top](#table-of-contents)
@@ -501,7 +500,7 @@ chmod 644 ~/.config/sealedge/mobile-app.cert
 - **Firewall Rules**: Restrict network access to authenticated endpoints
 
 #### Session Management
-- **Short Timeouts**: Use shorter session timeouts for high-security environments
+- **Fixed Timeouts**: Sessions expire after a fixed 30-minute timeout; re-authenticate to continue
 - **Session Monitoring**: Monitor active sessions and detect anomalies
 - **Clean Shutdown**: Ensure proper session cleanup on server shutdown
 - **Resource Limits**: Implement connection limits to prevent resource exhaustion
@@ -533,8 +532,8 @@ Add authentication parameters to client:
 ```bash
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input data.txt \
-  --require-auth \
+  --file data.txt \
+  --enable-auth \
   --client-identity "My Client"
 ```
 
@@ -565,12 +564,9 @@ rm client_identity.cert server_identity.cert
 ```
 
 **Solution:**
-- Sessions expire after configured timeout (default: 300 seconds)
-- Reconnect with fresh authentication
-- Consider longer session timeout for your use case:
-```bash
---session-timeout 600  # 10 minutes
-```
+- Sessions expire after a fixed 1800-second (30-minute) timeout
+- Reconnect with fresh authentication; a new ECDH session key is derived
+  automatically on the next handshake
 
 ### Debug Mode
 
@@ -585,7 +581,7 @@ Enable verbose logging for authentication debugging:
 
 # Client debug  
 ./target/release/sealedge-client \
-  --require-auth \
+  --enable-auth \
   --verbose \
   --client-identity "Debug Client"
 ```
@@ -613,7 +609,7 @@ stat server_identity.cert client_identity.cert
 - [ ] Generate production Ed25519 key pairs
 - [ ] Set appropriate file permissions on private keys (`chmod 600`)
 - [ ] Configure secure certificate storage location
-- [ ] Set production-appropriate session timeouts
+- [ ] Understand the fixed 30-minute session timeout and client reconnect behavior
 - [ ] Enable comprehensive logging
 
 #### Network Configuration
@@ -649,7 +645,6 @@ chmod 700 "$(dirname $SERVER_KEY)" "$UPLOAD_DIR"
   --require-auth \
   --server-identity "Sealedge Production Server $(date +%Y)" \
   --server-key "$SERVER_KEY" \
-  --session-timeout 300 \
   --decrypt \
   --use-keyring \
   --salt-hex "$PRODUCTION_SALT" \
@@ -672,7 +667,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/sealedge-server /usr/local/bin/
 EXPOSE 8080
-CMD ["sealedge-server", "--require-auth", "--bind-addr", "0.0.0.0:8080"]
+CMD ["sealedge-server", "--require-auth", "--listen", "0.0.0.0:8080"]
 ```
 
 #### Kubernetes Configuration
@@ -724,12 +719,10 @@ spec:
         image: sealedge:latest
         args: 
           - "--require-auth"
-          - "--bind-addr"
+          - "--listen"
           - "0.0.0.0:8080"
           - "--server-identity"
           - "Sealedge-K8s-Production"
-          - "--session-timeout"
-          - "300"
         ports:
         - containerPort: 8080
           name: sealedge

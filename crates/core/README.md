@@ -11,8 +11,6 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 
 **Core cryptographic library and CLI tools for privacy-preserving edge computing.**
 
-[![Crates.io](https://img.shields.io/crates/v/sealedge-core.svg)](https://crates.io/crates/sealedge-core)
-[![Documentation](https://docs.rs/sealedge-core/badge.svg)](https://docs.rs/sealedge-core)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 
 ---
@@ -23,11 +21,11 @@ Sealedge Core is the **foundational crate** of the sealedge ecosystem, providing
 
 ### Key Features
 
-- **Production Cryptography**: AES-256-GCM encryption with PBKDF2 key derivation (100k iterations)
+- **Production Cryptography**: AES-256-GCM encryption with PBKDF2 key derivation (600,000 iterations)
 - **Universal Backend System**: Pluggable crypto operations (Software HSM, Keyring, YubiKey)
 - **Live Audio Capture**: Real-time microphone input with configurable quality and device selection
 - **Network Operations**: Secure client-server communication with mutual authentication
-- **Hardware Integration**: Full YubiKey PKCS#11 support with real hardware signing
+- **Hardware Integration**: YubiKey PIV support with real hardware signing
 - **Algorithm Agility**: Configurable cryptographic algorithms with forward compatibility
 - **Format-Aware Processing**: MIME type detection and format-preserving encryption/decryption
 - **Memory Safety**: Proper key material cleanup with zeroization
@@ -47,12 +45,11 @@ sealedge-core/
 │   ├── sealedge-server.rs       # Network server
 │   ├── sealedge-client.rs       # Network client
 │   ├── software-hsm-demo.rs     # Software HSM demonstration
-│   ├── inspect-seal.rs          # .seal archive inspector
-│   └── yubikey-demo.rs          # YubiKey hardware operations
+│   └── inspect-seal.rs          # .seal archive inspector
 ├── src/backends/                # Universal Backend system
 ├── src/transport/               # Network transport layer
-├── examples/                    # Comprehensive examples
-└── tests/                       # Test suite (160 tests)
+├── examples/                    # Runnable examples
+└── tests/                       # Test suite
 ```
 
 ### Core Modules
@@ -60,12 +57,12 @@ sealedge-core/
 | Module | Purpose | Key Types |
 |--------|---------|-----------|
 | **envelope** | Cryptographic envelope format | `Envelope`, `EnvelopeMetadata` |
-| **backends** | Universal Backend system | `UniversalBackend`, `KeyringBackend` |
+| **backends** | Universal Backend system | `UniversalBackend`, `UniversalBackendRegistry` |
 | **audio** | Live audio capture | `AudioCapture`, `AudioConfig` |
 | **auth** | Network authentication | `SessionManager`, `AuthChallenge` |
-| **transport** | Network operations | `Transport`, `TransportConfig` |
+| **transport** | Network operations | `TransportConfig`, `NetworkChunk` |
 | **asymmetric** | Public key cryptography | `KeyPair`, `PrivateKey`, `PublicKey` |
-| **format** | Data format handling | `DataType`, `NetworkChunk` |
+| **format** | Data format handling | `DataType` |
 
 [↑ Back to top](#sealedge-core)
 
@@ -75,11 +72,12 @@ sealedge-core/
 
 ### Library Usage
 
-Add to your `Cargo.toml`:
+`sealedge-core` is not published to crates.io. Depend on it by path from within the
+workspace (or via a git dependency):
 
 ```toml
 [dependencies]
-sealedge-core = "0.2.0"
+sealedge-core = { path = "../core" }
 ```
 
 **Basic encryption/decryption:**
@@ -105,22 +103,22 @@ assert_eq!(decrypted, data);
 **Universal Backend usage:**
 
 ```rust
-use sealedge_core::backends::{UniversalBackend, CryptoOperation};
+use sealedge_core::{CryptoOperation, CryptoResult, HashAlgorithm, UniversalBackendRegistry};
 
-// Create backend
-let backend = UniversalBackend::keyring()?;
+// Create a registry with the default backends
+let registry = UniversalBackendRegistry::with_defaults()?;
 
-// Perform operations
-let operation = CryptoOperation::DeriveKey {
-    domain: "sealedge".to_string(),
-    purpose: "encryption".to_string(),
+// Perform an operation; the registry routes it to a capable backend
+let operation = CryptoOperation::Hash {
+    data: b"Hello, Universal Backend!".to_vec(),
+    algorithm: HashAlgorithm::Sha256,
 };
-let result = backend.perform_operation("my_key", operation)?;
+let result = registry.perform_operation("my_key", operation, None)?;
 ```
 
 ### CLI Applications
 
-**Main CLI (`sealedge-core`):**
+**Main CLI (`sealedge`):**
 ```bash
 # Encrypt a file
 ./target/release/sealedge --input document.txt --envelope document.seal --key-out key.hex
@@ -141,7 +139,7 @@ let result = backend.perform_operation("my_key", operation)?;
 **Network Client:**
 ```bash
 # Connect with authentication
-./target/release/sealedge-client --server 127.0.0.1:8080 --input file.txt --require-auth
+./target/release/sealedge-client --server 127.0.0.1:8080 --file file.txt --enable-auth
 ```
 
 [↑ Back to top](#sealedge-core)
@@ -152,25 +150,33 @@ let result = backend.perform_operation("my_key", operation)?;
 
 ### Universal Backend System
 
-The Universal Backend provides **pluggable cryptographic operations** across different backends:
+The Universal Backend provides **pluggable cryptographic operations** across different backends,
+dispatched by capability through a registry:
 
 ```rust
-use sealedge_core::backends::{UniversalBackend, BackendCapabilities};
+use sealedge_core::{CryptoOperation, HashAlgorithm, UniversalBackendRegistry};
 
-// Discover available backends
-let registry = UniversalBackend::registry();
-let backends = registry.discover_backends()?;
+// Discover and register the default backends
+let registry = UniversalBackendRegistry::with_defaults()?;
 
-// Use specific backend
-let yubikey_backend = UniversalBackend::yubikey()?;
-if yubikey_backend.supports_operation(&operation) {
-    let result = yubikey_backend.perform_operation("key_id", operation)?;
+for name in registry.list_backend_names() {
+    if let Some(backend) = registry.get_backend(name) {
+        let info = backend.backend_info();
+        println!("{}: {}", info.name, info.description);
+    }
 }
+
+// Perform an operation — the registry picks a backend that supports it
+let operation = CryptoOperation::Hash {
+    data: b"data".to_vec(),
+    algorithm: HashAlgorithm::Sha256,
+};
+let result = registry.perform_operation("key_id", operation, None)?;
 ```
 
 **Supported Backends:**
-- **Keyring Backend**: OS keyring integration for key derivation
-- **YubiKey Backend**: Hardware PIV operations with PKCS#11
+- **Keyring Backend**: OS keyring integration for key derivation (feature `keyring`)
+- **YubiKey Backend**: Hardware PIV operations (feature `yubikey`)
 - **Software HSM**: In-memory cryptographic operations
 - **TPM Backend**: TPM 2.0 operations (planned)
 
@@ -195,32 +201,39 @@ let envelope = Envelope::seal(
     &recipient_key.verifying_key(),
 )?;
 
-// Inspect without decrypting
-let info = envelope.inspect()?;
-println!("Envelope hash: {:?}", envelope.hash());
-println!("Beneficiary: {:?}", envelope.beneficiary());
+// Inspect metadata without decrypting
+println!("Envelope hash: {:?}", envelope.hash()?);
+println!("Beneficiary: {:?}", envelope.beneficiary()?);
+println!("Metadata: {:?}", envelope.metadata());
 ```
 
 ### Audio Capture System
 
-Real-time audio capture with **format-aware processing**:
+Real-time audio capture with **format-aware processing** (feature `audio`):
 
 ```rust
-use sealedge_core::{AudioCapture, AudioConfig};
+use sealedge_core::{AudioCapture, AudioConfig, Envelope};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
 
-// Configure audio capture
+// Configure audio capture (defaults: 44.1 kHz, mono, 1s chunks)
 let config = AudioConfig {
     sample_rate: 44100,
     channels: 1,
     device_name: None, // Use default device
+    ..AudioConfig::default()
 };
 
-// Capture audio
+// Capture audio in chunks
 let mut capture = AudioCapture::new(config)?;
-let audio_data = capture.record_for_duration(std::time::Duration::from_secs(10))?;
+capture.initialize()?;
+capture.start()?;
+let chunk = capture.next_chunk()?;
+capture.stop()?;
 
-// Encrypt captured audio
-let envelope = Envelope::seal(&audio_data, &sender_private, &recipient_public)?;
+// Encrypt the captured chunk
+let key = SigningKey::generate(&mut OsRng);
+let envelope = Envelope::seal(&chunk.to_bytes(), &key, &key.verifying_key())?;
 ```
 
 ### Network Authentication
@@ -228,15 +241,14 @@ let envelope = Envelope::seal(&audio_data, &sender_private, &recipient_public)?;
 **Mutual authentication** with Ed25519 signatures:
 
 ```rust
-use sealedge_core::auth::{SessionManager, ServerCertificate};
+use sealedge_core::auth::{SessionManager, ClientCertificate};
 
-// Server setup
-let server_keys = KeyPair::generate(AsymmetricAlgorithm::Ed25519)?;
-let mut session_manager = SessionManager::new();
+// Server setup — creates a self-signed server certificate
+let mut session_manager = SessionManager::new("my-server".to_string())?;
+let challenge = session_manager.create_challenge()?;
 
-// Client authentication
-let client_keys = KeyPair::generate(AsymmetricAlgorithm::Ed25519)?;
-let auth_result = client_authenticate(&client_keys, &server_cert)?;
+// Client setup — generates a client certificate/key pair
+let client_cert = ClientCertificate::generate("my-client")?;
 ```
 
 [↑ Back to top](#sealedge-core)
@@ -284,10 +296,10 @@ sealedge-server --listen 0.0.0.0:8080 --require-auth --decrypt --verbose
 **Client (`sealedge-client`):**
 ```bash
 # Send file to server
-sealedge-client --server 192.168.1.100:8080 --input document.txt
+sealedge-client --server 192.168.1.100:8080 --file document.txt
 
 # Authenticated transfer
-sealedge-client --server 192.168.1.100:8080 --input document.txt --require-auth
+sealedge-client --server 192.168.1.100:8080 --file document.txt --enable-auth
 ```
 
 ### Hardware Demonstrations
@@ -304,13 +316,12 @@ software-hsm-demo sign my_key "Hello sealedge!"
 software-hsm-demo list-keys
 ```
 
-**YubiKey Demo (requires `--features yubikey`):**
-```bash
-# YubiKey capabilities
-yubikey-demo -p /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so -v capabilities
+**YubiKey (requires `--features yubikey`):**
 
-# Generate certificate
-yubikey-demo -p /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so generate-cert
+YubiKey verification is demonstrated through examples rather than a standalone binary:
+```bash
+cargo run -p sealedge-core --features yubikey --example verify_yubikey
+cargo run -p sealedge-core --features yubikey --example verify_yubikey_custom_pin
 ```
 
 [↑ Back to top](#sealedge-core)
@@ -330,15 +341,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Generate keys
     let alice_key = SigningKey::generate(&mut OsRng);
     let bob_key = SigningKey::generate(&mut OsRng);
-    
+
     // Alice encrypts for Bob
     let message = b"Hello Bob from Alice!";
     let envelope = Envelope::seal(message, &alice_key, &bob_key.verifying_key())?;
-    
+
     // Bob decrypts
     let decrypted = envelope.unseal(&bob_key)?;
     assert_eq!(decrypted, message);
-    
+
     println!("✔ Encryption/decryption successful");
     Ok(())
 }
@@ -347,22 +358,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Example 2: Universal Backend
 
 ```rust
-use sealedge_core::backends::{UniversalBackend, CryptoOperation};
+use sealedge_core::{CryptoOperation, HashAlgorithm, UniversalBackendRegistry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create keyring backend
-    let backend = UniversalBackend::keyring()?;
-    
-    // Derive key
-    let operation = CryptoOperation::DeriveKey {
-        domain: "sealedge".to_string(),
-        purpose: "file_encryption".to_string(),
+    // Create a registry with default backends
+    let registry = UniversalBackendRegistry::with_defaults()?;
+
+    // Hash some data through whichever backend supports it
+    let operation = CryptoOperation::Hash {
+        data: b"user data".to_vec(),
+        algorithm: HashAlgorithm::Sha256,
     };
-    
-    let result = backend.perform_operation("user_key", operation)?;
-    println!("✔ Key derivation successful");
+
+    let _result = registry.perform_operation("user_key", operation, None)?;
+    println!("✔ Hash operation successful");
     Ok(())
 }
+```
+
+A fuller walkthrough lives in `examples/universal_backend_demo.rs`:
+```bash
+cargo run -p sealedge-core --example universal_backend_demo
 ```
 
 ### Example 3: Audio Capture
@@ -370,28 +386,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 #[cfg(feature = "audio")]
 use sealedge_core::{AudioCapture, AudioConfig, Envelope};
+#[cfg(feature = "audio")]
 use ed25519_dalek::SigningKey;
+#[cfg(feature = "audio")]
 use rand::rngs::OsRng;
 
 #[cfg(feature = "audio")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup audio capture
-    let config = AudioConfig {
-        sample_rate: 44100,
-        channels: 1,
-        device_name: None,
-    };
-    
-    let mut capture = AudioCapture::new(config)?;
-    
-    // Record 5 seconds
-    let audio_data = capture.record_for_duration(std::time::Duration::from_secs(5))?;
-    println!("Captured {} bytes of audio", audio_data.len());
-    
-    // Encrypt audio
+    let mut capture = AudioCapture::new(AudioConfig::default())?;
+    capture.initialize()?;
+    capture.start()?;
+
+    // Grab one chunk
+    let chunk = capture.next_chunk()?;
+    capture.stop()?;
+    let bytes = chunk.to_bytes();
+    println!("Captured {} bytes of audio", bytes.len());
+
+    // Encrypt captured audio
     let key = SigningKey::generate(&mut OsRng);
-    let envelope = Envelope::seal(&audio_data, &key, &key.verifying_key())?;
-    
+    let _envelope = Envelope::seal(&bytes, &key, &key.verifying_key())?;
+
     println!("✔ Audio capture and encryption successful");
     Ok(())
 }
@@ -402,23 +418,19 @@ fn main() {
 }
 ```
 
-### Example 4: Network Operations
+### Example 4: Network Authentication Setup
 
 ```rust
-use sealedge_core::auth::{SessionManager, ServerCertificate};
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
+use sealedge_core::auth::{SessionManager, ClientCertificate};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Server setup
-    let server_key = SigningKey::generate(&mut OsRng);
-    let server_cert = ServerCertificate::new(&server_key)?;
-    let mut session_manager = SessionManager::new();
-    
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Server setup — SessionManager creates a self-signed server certificate
+    let mut session_manager = SessionManager::new("demo-server".to_string())?;
+    let _challenge = session_manager.create_challenge()?;
+
     // Client setup
-    let client_key = SigningKey::generate(&mut OsRng);
-    
+    let _client_cert = ClientCertificate::generate("demo-client")?;
+
     println!("✔ Network authentication setup complete");
     Ok(())
 }
@@ -432,22 +444,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Cargo Features
 
+Default build enables **no** features for fast CI and maximum portability.
+
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `audio` | Enable live audio capture functionality | No |
 | `yubikey` | Enable YubiKey hardware backend | No |
-| `network` | Enable network transport features | Yes |
-| `keyring` | Enable OS keyring integration | Yes |
+| `git-attestation` | Enable git repository state attestation | No |
+| `keyring` | Enable OS keyring integration | No |
+| `insecure-tls` | Skip TLS certificate verification (development only) | No |
 
 **Build with features:**
 ```bash
 # Audio support
 cargo build --features audio
 
-# YubiKey support  
+# YubiKey support
 cargo build --features yubikey
 
-# All features
+# Multiple features
 cargo build --features audio,yubikey
 ```
 
@@ -483,7 +498,7 @@ brew install opensc
 
 ## Testing
 
-Sealedge Core includes **160 comprehensive tests** covering all functionality:
+Sealedge Core includes a comprehensive test suite covering all functionality:
 
 ```bash
 # Run all tests
@@ -513,13 +528,13 @@ cargo bench
 ### Performance Testing
 
 ```bash
-# Quick benchmarks
-./fast-bench.sh
+# Quick benchmarks (from project root)
+./scripts/fast-bench.sh
 
 # Full benchmark suite
 cargo bench
 
-# Performance analysis
+# Transport demo
 cargo run --example transport_demo --release
 ```
 
@@ -536,52 +551,65 @@ Secure cryptographic envelope for data protection:
 
 ```rust
 impl Envelope {
-    pub fn seal(data: &[u8], sender_private: &PrivateKey, recipient_public: &PublicKey) -> Result<Self>;
-    pub fn unseal(&self, recipient_private: &PrivateKey) -> Result<Vec<u8>>;
-    pub fn inspect(&self) -> Result<EnvelopeInfo>;
+    pub fn seal(payload: &[u8], signing_key: &SigningKey, beneficiary_key: &VerifyingKey) -> Result<Self>;
+    pub fn unseal(&self, decryption_key: &SigningKey) -> Result<Vec<u8>>;
     pub fn verify(&self) -> bool;
+    pub fn hash(&self) -> Result<[u8; 32]>;
+    pub fn beneficiary(&self) -> Result<VerifyingKey>;
+    pub fn issuer(&self) -> Result<VerifyingKey>;
+    pub fn metadata(&self) -> &EnvelopeMetadata;
 }
 ```
 
-#### `UniversalBackend`
-Pluggable cryptographic backend system:
+#### `UniversalBackendRegistry`
+Capability-based routing across pluggable backends:
 
 ```rust
-impl UniversalBackend {
-    pub fn keyring() -> Result<Self>;
-    pub fn yubikey() -> Result<Self>;
-    pub fn software_hsm() -> Result<Self>;
-    pub fn perform_operation(&self, key_id: &str, operation: CryptoOperation) -> Result<CryptoResult>;
-    pub fn supports_operation(&self, operation: &CryptoOperation) -> bool;
+impl UniversalBackendRegistry {
+    pub fn with_defaults() -> Result<Self>;
+    pub fn perform_operation(&self, key_id: &str, operation: CryptoOperation, preferences: Option<&BackendPreferences>) -> Result<CryptoResult, BackendError>;
+    pub fn list_backend_names(&self) -> Vec<&str>;
+    pub fn get_backend(&self, name: &str) -> Option<&dyn UniversalBackend>;
 }
 ```
 
+`UniversalBackend` is the trait each backend implements; its core methods are
+`perform_operation`, `supports_operation`, `backend_info`, and `get_capabilities`.
+
 #### `AudioCapture`
-Live audio capture functionality:
+Live audio capture functionality (feature `audio`):
 
 ```rust
 impl AudioCapture {
     pub fn new(config: AudioConfig) -> Result<Self>;
-    pub fn record_for_duration(&mut self, duration: Duration) -> Result<Vec<u8>>;
-    pub fn list_devices() -> Result<Vec<String>>;
+    pub fn initialize(&mut self) -> Result<()>;
+    pub fn start(&mut self) -> Result<()>;
+    pub fn next_chunk(&self) -> Result<AudioChunk>;
+    pub fn stop(&mut self) -> Result<()>;
+    pub fn list_devices(&self) -> Result<Vec<String>>;
+    pub fn config(&self) -> &AudioConfig;
 }
 ```
 
 ### Error Handling
 
-Sealedge Core provides comprehensive error types:
+Sealedge Core exposes a single top-level error enum, `TrustEdgeError`, which wraps the
+domain-specific error types:
 
 ```rust
-use sealedge_core::SealedgeError;
+use sealedge_core::TrustEdgeError;
 
 match operation_result {
     Ok(data) => println!("Success: {} bytes", data.len()),
-    Err(SealedgeError::CryptographicError(e)) => eprintln!("Crypto error: {}", e),
-    Err(SealedgeError::NetworkError(e)) => eprintln!("Network error: {}", e),
-    Err(SealedgeError::AudioError(e)) => eprintln!("Audio error: {}", e),
+    Err(TrustEdgeError::Crypto(e)) => eprintln!("Crypto error: {}", e),
+    Err(TrustEdgeError::Transport(e)) => eprintln!("Transport error: {}", e),
+    Err(TrustEdgeError::Archive(e)) => eprintln!("Archive error: {}", e),
     Err(e) => eprintln!("Other error: {}", e),
 }
 ```
+
+The full set of variants is `Crypto`, `PointAttestation`, `Backend`, `Transport`,
+`Archive`, `Manifest`, `Chain`, `Asymmetric`, `Io`, and `Json`.
 
 [↑ Back to top](#sealedge-core)
 
@@ -589,24 +617,16 @@ match operation_result {
 
 ## Performance
 
-### Benchmarks
+Sealedge Core is optimized for streaming edge workloads. Rather than publish figures
+that drift out of date, measure on your own hardware:
 
-Sealedge Core is optimized for performance:
+```bash
+# Quick local benchmarks (from project root)
+./scripts/fast-bench.sh
 
-| Operation | Throughput | Latency |
-|-----------|------------|---------|
-| **File Encryption** | ~500 MB/s | ~2ms |
-| **File Decryption** | ~600 MB/s | ~1.5ms |
-| **Key Generation** | ~1000 keys/s | ~1ms |
-| **Audio Capture** | Real-time | <10ms latency |
-| **Network Auth** | ~500 auths/s | ~2ms |
-
-### Memory Usage
-
-- **Base Library**: ~2MB memory footprint
-- **Audio Capture**: +~5MB for buffers
-- **YubiKey Backend**: +~1MB for PKCS#11
-- **Network Operations**: +~3MB for connections
+# Full statistical benchmark suite
+cargo bench
+```
 
 ### Optimization Tips
 
@@ -616,6 +636,7 @@ Sealedge Core is optimized for performance:
 4. **Backend Selection**: Choose appropriate backend for use case
 
 ```rust
+use sealedge_core::Envelope;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
@@ -625,7 +646,7 @@ let files = vec!["file1.txt", "file2.txt", "file3.txt"];
 
 for file in files {
     let data = std::fs::read(file)?;
-    let envelope = Envelope::seal(&data, &key, &key.verifying_key())?;
+    let _envelope = Envelope::seal(&data, &key, &key.verifying_key())?;
     // Process envelope...
 }
 ```
@@ -637,7 +658,7 @@ for file in files {
 ### With Other Sealedge Crates
 
 ```rust
-// Receipts (now consolidated in core)
+// Receipts (consolidated in core)
 use sealedge_core::create_receipt;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -645,7 +666,7 @@ use rand::rngs::OsRng;
 let key = SigningKey::generate(&mut OsRng);
 let receipt = create_receipt(&key, &key.verifying_key(), 1000, None)?;
 
-// Attestation (now consolidated in core)
+// Attestation (consolidated in core)
 use sealedge_core::{create_signed_attestation, AttestationConfig};
 
 // With sealedge-wasm
@@ -653,22 +674,20 @@ use sealedge_core::Envelope;
 // Export envelope functionality to WebAssembly
 
 // With sealedge-pubky (community/experimental)
-use sealedge_core::backends::UniversalBackend;
+use sealedge_core::UniversalBackendRegistry;
 // Use core backends with Pubky network integration
 ```
 
 ### External Integration
 
 ```rust
-// With tokio for async operations
+// With tokio for async I/O; serialize the envelope with bincode
 use tokio::fs;
 use sealedge_core::Envelope;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let data = fs::read("file.txt").await?;
-    let envelope = Envelope::seal(&data, &sender_private, &recipient_public)?;
-    fs::write("file.seal", envelope.serialize()?).await?;
+async fn write_envelope(envelope: &Envelope) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = bincode::serialize(envelope)?;
+    fs::write("file.seal", bytes).await?;
     Ok(())
 }
 ```
@@ -687,24 +706,24 @@ We welcome contributions to Sealedge Core:
 4. **Network Features**: Improve transport layer functionality
 5. **Hardware Integration**: Expand hardware security module support
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for detailed guidelines.
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) for detailed guidelines.
 
 ### Development Setup
 
 ```bash
 # Clone repository
 git clone https://github.com/TrustEdge-Labs/sealedge.git
-cd sealedge/sealedge-core
+cd sealedge
 
 # Run tests
-cargo test
+cargo test -p sealedge-core
 
 # Run with all features
-cargo test --features audio,yubikey
+cargo test -p sealedge-core --features audio,yubikey
 
 # Run examples
-cargo run --example universal_backend_demo
-cargo run --example transport_demo
+cargo run -p sealedge-core --example universal_backend_demo
+cargo run -p sealedge-core --example transport_demo
 
 # Check formatting
 cargo fmt --check
@@ -718,15 +737,9 @@ cargo fmt --check
 
 ### Crate-Specific Documentation
 - **[AUTHENTICATION.md](AUTHENTICATION.md)** - Network authentication details
-- **[BENCHMARKS.md](BENCHMARKS.md)** - Performance benchmarks and analysis
-- **[PERFORMANCE.md](PERFORMANCE.md)** - Performance optimization guide
-- **[SOFTWARE_HSM_TEST_REPORT.md](SOFTWARE_HSM_TEST_REPORT.md)** - Software HSM testing results
 
 ### Project Documentation
 - **[Main README](../../README.md)** - Project overview and quick start
-- **[CLI Reference](../../CLI.md)** - Complete command-line documentation
-- **[Examples](../../EXAMPLES.md)** - Real-world usage examples
-- **[Universal Backend Guide](../../UNIVERSAL_BACKEND.md)** - Backend system architecture
 
 [↑ Back to top](#sealedge-core)
 
@@ -744,7 +757,7 @@ This project is licensed under the Mozilla Public License 2.0 (MPL-2.0).
 
 ## Security
 
-For security issues, please follow our [responsible disclosure policy](../SECURITY.md).
+For security issues, please follow our [responsible disclosure policy](../../SECURITY.md).
 
 **Security Contact**: [security@trustedgelabs.com](mailto:security@trustedgelabs.com)
 

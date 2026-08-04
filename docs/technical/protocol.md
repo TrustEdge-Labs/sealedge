@@ -259,7 +259,7 @@ The key management system uses pluggable backends via the `UniversalBackend` tra
 
 **PBKDF2 Parameters:**
 - PBKDF2 with SHA-256
-- 100,000 iterations
+- 600,000 iterations
 - 16-byte (32 hex char) salt (required with `--use-keyring`)
 
 ### Connection Management Options

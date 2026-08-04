@@ -27,12 +27,13 @@ Sealedge is currently in active development. Security updates are provided for:
 
 Sealedge implements privacy-preserving edge data encryption with the following security properties:
 
-- **Encryption**: AES-256-GCM authenticated encryption
-- **Key Derivation**: PBKDF2-HMAC-SHA256 (600k iterations + AES-256-GCM) for encrypted key files at rest (SEALEDGE-KEY-V1 format); HKDF-SHA256 for envelope key derivation (v1.8+)
+- **Encryption**: AES-256-GCM authenticated encryption (envelopes); XChaCha20-Poly1305 for `.seal` archive chunks
+- **Key Derivation**: PBKDF2-HMAC-SHA256 (600k iterations + AES-256-GCM) for encrypted key files at rest (SEALEDGE-KEY-V2 format); HKDF-SHA256 for envelope key derivation (v1.8+)
+- **Key Agreement**: X25519 ECDH for envelope key agreement; HPKE (RFC 9180 base mode; DHKEM(X25519,HKDF-SHA256)) wraps the per-archive content-encryption key to recipients
 - **Digital Signatures**: Ed25519 for manifest integrity with domain separation
 - **Hashing**: BLAKE3 for content verification
-- **Nonce Management**: Deterministic 12-byte nonces (4-byte random prefix + 8-byte counter)
-- **Asymmetric Encryption**: RSA OAEP-SHA256 for hybrid encryption (v2.2+)
+- **Nonce Management**: Deterministic 12-byte envelope nonces (8-byte HKDF-derived prefix + 3-byte big-endian chunk index + 1-byte last-chunk flag)
+- **Asymmetric Encryption**: RSA OAEP-SHA256 in the optional hybrid encryption path only (v2.2+)
 
 **Domain Separation**: Manifest signatures use cryptographic domain separation (`b"sealedge.manifest.v1"`) to prevent signature reuse across different contexts or protocols, ensuring signatures cannot be substituted from other systems.
 
@@ -49,9 +50,10 @@ Sealedge implements privacy-preserving edge data encryption with the following s
 - Ed25519 digital signatures for provenance with domain separation
 - **X25519 ECDH Session Key Exchange**: Automated key derivation during auth handshake with BLAKE3 domain-separated KDF
 - **Secret<T> Wrapper Type**: Zeroize-on-drop protection with redacted Debug for all sensitive fields (PINs, passphrases, JWT secrets, passwords)
-- **Encrypted Key Files at Rest**: SEALEDGE-KEY-V1 format — PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM (v2.2+)
+- **Encrypted Key Files at Rest**: SEALEDGE-KEY-V2 format (Ed25519 signing key + independent X25519 key-agreement key) — PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM (v2.2+)
 - **HKDF-SHA256 Envelope KDF**: Versioned envelope key derivation replacing legacy PBKDF2 usage (v1.8+)
-- **RSA OAEP-SHA256**: Hybrid asymmetric encryption replacing PKCS#1v1.5 padding (v2.2+)
+- **X25519 ECDH + HPKE**: X25519 key agreement for envelopes; HPKE (RFC 9180) wraps the per-archive content-encryption key to recipients
+- **RSA OAEP-SHA256**: Optional hybrid asymmetric encryption path replacing PKCS#1v1.5 padding (v2.2+)
 - Connection timeouts and retry logic
 - Graceful shutdown handling
 - Domain separation prevents cross-context signature reuse
@@ -199,7 +201,7 @@ We appreciate security researchers who help improve Sealedge security:
 | Network Protocol | March 2026 | ✅ Reviewed | Transport timeout security documented |
 | File Format | March 2026 | ✅ Reviewed | Base64, timestamp, permissions hardened |
 
-**Previous Audit**: v2.4 Security Review Remediation completed March 2026 — 406 tests across 9 workspace crates, including 45+ dedicated security tests
+**Previous Audit**: v2.4 Security Review Remediation completed March 2026 — full workspace test suite across 9 workspace crates, including 45+ dedicated security tests
 
 ## Compliance and Standards
 

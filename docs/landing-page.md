@@ -43,10 +43,10 @@ seal attest-sbom --binary ./my-app --sbom sbom.cdx.json \
 
 # 3. Verify locally
 seal verify-attestation attestation.se-attestation.json \
-  --device-pub "$(cat device.pub)"
+  --device-pub device.pub
 ```
 
-Output: `attestation.se-attestation.json` — a signed JSON document containing BLAKE3 hashes of both the binary and SBOM, the full SBOM contents, Ed25519 signature, nonce, and timestamp. Ship it alongside your release binary.
+Output: `attestation.se-attestation.json` — a signed JSON document containing BLAKE3 hashes of both the binary and SBOM, an Ed25519 signature, a nonce, and a timestamp. Ship it alongside your release binary and SBOM.
 
 ## GitHub Action
 
@@ -72,12 +72,11 @@ The action generates a keypair, runs `seal attest-sbom`, and uploads the attesta
 
 Each `.se-attestation.json` file contains:
 
-- BLAKE3 hash of the binary artifact
-- BLAKE3 hash of the CycloneDX SBOM
-- Full SBOM contents (embedded)
+- BLAKE3 hash of the binary artifact (`b3:` prefixed)
+- BLAKE3 hash of the CycloneDX SBOM (`b3:` prefixed)
 - Ed25519 signature over canonical JSON
 - Random nonce (replay prevention)
 - RFC 3339 timestamp
 - Format version discriminant (`te-point-attestation-v1`)
 
-The attestation is self-contained — verifiers don't need to contact Sealedge infrastructure. Public key distribution is left to you (GitHub releases, DNS, key servers, or direct exchange).
+The attestation stores hashes, not the files themselves — keep the original binary and SBOM to re-check the hashes at verification time. Verifying needs no Sealedge infrastructure; public key distribution is left to you (GitHub releases, DNS, key servers, or direct exchange).

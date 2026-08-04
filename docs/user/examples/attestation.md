@@ -7,59 +7,66 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 
 # Software Attestation Examples
 
-Create and verify cryptographically signed software "birth certificates" for supply chain security.
+Create and verify cryptographically signed **point attestations** that bind a
+software artifact (the subject) to its CycloneDX SBOM (the evidence). Each
+attestation is a self-contained `.se-attestation.json` file carrying BLAKE3
+hashes of both files, an Ed25519 signature, a random nonce, a timestamp, and the
+signer's public key — so any third party can verify it with no Sealedge
+infrastructure.
+
+Attestation lives in the `seal` CLI as two subcommands: `attest-sbom` and
+`verify-attestation`. There are no `sealedge-attest` / `sealedge-verify`
+binaries.
 
 ## Basic Attestation Workflow
-
-Create and verify cryptographically signed software "birth certificates":
 
 ```bash
 # Build your application
 cargo build --release
 
-# Create an attestation for the binary
-sealedge-attest --file target/release/my-app \
-                 --builder-id "developer@company.com" \
-                 --output my-app.seal \
-                 --verbose
+# One-time: generate a signing key bundle (SEALEDGE-KEY-V2)
+# Use --unencrypted only for CI/automation; omit it to be prompted for a passphrase.
+seal keygen --out-key build.key --out-pub build.pub --unencrypted
+
+# Generate a CycloneDX SBOM (e.g. via cargo-cyclonedx)
+cargo cyclonedx --format json
+
+# Create an attestation binding the SBOM to the binary
+seal attest-sbom \
+  --binary target/release/my-app \
+  --sbom bom.json \
+  --device-key build.key \
+  --device-pub build.pub \
+  --out my-app.se-attestation.json \
+  --unencrypted
+
+# Example output (stderr):
+# ✔ Attestation written to my-app.se-attestation.json
+#   Public key: ed25519:GAUpGXoor5gP6JDkeVtj/PV4quuyLlZlojizplendEU=
+#   Subject:    a1b2c3d4e5f6789a... (my-app)
+#   Evidence:   0f1e2d3c4b5a6978... (bom.json)
+
+# Verify the attestation (signature only)
+seal verify-attestation my-app.se-attestation.json --device-pub build.pub
 
 # Example output:
-# ● Sealedge Software Attestation Tool
-# =====================================
-# ● Artifact: target/release/my-app
-# ● Builder: developer@company.com
-# ● Output: my-app.seal
-# ● Analyzing artifact and repository...
-# ✔ Attestation created:
-#    ● Artifact: my-app
-#    ● Hash: a1b2c3d4e5f6789a...
-#    ● Commit: 0a9a9c9fa2e8b1c4...
-#    ● Timestamp: 2025-09-19T14:30:00Z
-# ✔ Sealed attestation created: my-app.seal
+# Format:     te-point-attestation-v1
+# Public key: ed25519:GAUpGXoor5gP6JDkeVtj/PV4quuyLlZlojizplendEU=
+# Timestamp:  2025-09-19T14:30:00Z
+# Subject:    a1b2c3d4e5f6789a... (my-app)
+# Evidence:   0f1e2d3c4b5a6978... (bom.json)
+# Signature:  VERIFIED
 
-# Verify the attestation
-sealedge-verify --artifact target/release/my-app \
-                 --attestation-file my-app.seal \
-                 --verbose
-
-# Example output:
-# ● Sealedge Attestation Verification Tool
-# ==========================================
-# ● Artifact: target/release/my-app
-# ● Attestation: my-app.seal
-# ● Reading attestation (trying envelope first, JSON fallback)...
-# ● Computing artifact hash...
-# ✔ VERIFICATION SUCCESSFUL
-# ● Artifact Details:
-#    • Name: my-app
-#    • Hash: a1b2c3d4e5f6789a...
-#    • Size: 2456789 bytes
-# ● Provenance Information:
-#    • Source Commit: 0a9a9c9fa2e8b1c4d8f2e1a6b9c5...
-#    • Builder ID: developer@company.com
-#    • Created: 2025-09-19T14:30:00Z
-# ✔ This software artifact is AUTHENTICATED and VERIFIED
+# Verify signature AND re-hash the files (fails on any mismatch, exit 10)
+seal verify-attestation my-app.se-attestation.json \
+  --device-pub build.pub \
+  --binary target/release/my-app \
+  --sbom bom.json
 ```
+
+`--device-pub` accepts either an inline `ed25519:<base64>` string or a path to a
+`.pub` file (a V2 `.pub` has two lines; the Ed25519 line is selected
+automatically).
 
 ## CI/CD Integration Example
 
@@ -68,79 +75,90 @@ Integrate attestation into your CI/CD pipeline:
 ```bash
 #!/bin/bash
 # .github/workflows/release.yml or similar
+set -e
 
 # Build the release
 cargo build --release
 
-# Get CI environment info
-CI_JOB_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}"
+# Generate SBOM and (unencrypted) signing key for the runner
+cargo cyclonedx --format json
+seal keygen --out-key build.key --out-pub build.pub --unencrypted
+
 ARTIFACT_NAME="my-app-${GITHUB_REF_NAME}"
 
-# Create attestation with CI context
-sealedge-attest --file "target/release/my-app" \
-                 --builder-id "ci-job-${CI_JOB_ID}" \
-                 --output "${ARTIFACT_NAME}.seal" \
-                 --verbose
+# Create the attestation
+seal attest-sbom \
+  --binary "target/release/my-app" \
+  --sbom bom.json \
+  --device-key build.key \
+  --device-pub build.pub \
+  --out "${ARTIFACT_NAME}.se-attestation.json" \
+  --unencrypted
 
-# Upload both artifact and attestation
+# Upload artifact, SBOM, and attestation
 aws s3 cp "target/release/my-app" "s3://releases/${ARTIFACT_NAME}"
-aws s3 cp "${ARTIFACT_NAME}.seal" "s3://releases/${ARTIFACT_NAME}.seal"
+aws s3 cp "bom.json" "s3://releases/${ARTIFACT_NAME}.bom.json"
+aws s3 cp "${ARTIFACT_NAME}.se-attestation.json" "s3://releases/${ARTIFACT_NAME}.se-attestation.json"
 
 echo "✔ Release ${ARTIFACT_NAME} uploaded with attestation"
 ```
 
 ## Supply Chain Verification
 
-Verify software throughout the supply chain:
+Verify software throughout the supply chain. Because the attestation embeds the
+signer's public key, you only need the artifact, its SBOM, and the trusted
+public key you expect the signer to hold.
 
 ```bash
-# Download artifact and attestation
+# Download artifact, SBOM, and attestation
 aws s3 cp "s3://releases/my-app-v1.0.0" ./my-app
-aws s3 cp "s3://releases/my-app-v1.0.0.seal" ./my-app.seal
+aws s3 cp "s3://releases/my-app-v1.0.0.bom.json" ./bom.json
+aws s3 cp "s3://releases/my-app-v1.0.0.se-attestation.json" ./my-app.se-attestation.json
 
-# Verify integrity and provenance
-sealedge-verify --artifact my-app \
-                 --attestation-file my-app.seal \
-                 --verbose
+# Verify signature and re-hash both files against the attestation
+seal verify-attestation my-app.se-attestation.json \
+  --device-pub "ed25519:GAUpGXoor5gP6JDkeVtj/PV4quuyLlZlojizplendEU=" \
+  --binary my-app \
+  --sbom bom.json
 
-# Check exit code for automation
+# Check exit code for automation (0 = pass, 10 = signature/hash mismatch)
 if [ $? -eq 0 ]; then
     echo "✔ Software verification PASSED - safe to deploy"
     chmod +x my-app
-    ./my-app
 else
     echo "✖ Software verification FAILED - DO NOT DEPLOY"
     exit 1
 fi
 ```
 
-## JSON Inspection Mode
+## Inspecting an Attestation
 
-Create JSON-only attestations for debugging and inspection:
+The attestation is plain JSON — inspect it directly:
 
 ```bash
-# Create JSON attestation (no cryptographic envelope)
-sealedge-attest --file target/release/my-app \
-                 --builder-id "debug-build" \
-                 --output attestation.json \
-                 --json-only
+cat my-app.se-attestation.json | jq .
 
-# Inspect the raw attestation data
-cat attestation.json | jq .
-
-# Example output:
+# Example structure:
 # {
-#   "artifact_hash": "a1b2c3d4e5f6789ab1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4",
-#   "artifact_name": "my-app",
-#   "source_commit_hash": "0a9a9c9fa2e8b1c4d8f2e1a6b9c5a4d7f8e3b2c1",
-#   "builder_id": "debug-build",
-#   "timestamp": "2025-09-19T14:30:00Z"
+#   "format": "te-point-attestation-v1",
+#   "subject":  { "hash": "a1b2c3...", "filename": "my-app", "label": "binary" },
+#   "evidence": { "hash": "0f1e2d...", "filename": "bom.json", "label": "sbom" },
+#   "nonce": "9f8e7d6c5b4a39281706...",
+#   "timestamp": "2025-09-19T14:30:00Z",
+#   "public_key": "ed25519:GAUpGXoor5gP6JDkeVtj/PV4quuyLlZlojizplendEU=",
+#   "signature": "..."
 # }
+```
 
-# Verify JSON attestation
-sealedge-verify --artifact target/release/my-app \
-                 --attestation-file attestation.json \
-                 --json-input
+## Submit to the Platform Server
+
+For a hosted verification receipt, POST the attestation to a running
+platform server:
+
+```bash
+curl -X POST http://localhost:3001/v1/verify-attestation \
+  -H "Content-Type: application/json" \
+  -d @my-app.se-attestation.json
 ```
 
 ## Multi-Platform Release Attestation
@@ -150,21 +168,26 @@ Create attestations for multiple build targets:
 ```bash
 #!/bin/bash
 # Multi-platform build and attestation script
+set -e
 
 TARGETS=("x86_64-unknown-linux-gnu" "aarch64-unknown-linux-gnu" "x86_64-pc-windows-gnu")
-BUILDER_ID="release-automation-v1.0.0"
+
+# One SBOM and signing key for the release
+cargo cyclonedx --format json
+seal keygen --out-key build.key --out-pub build.pub --unencrypted
+mkdir -p releases
 
 for target in "${TARGETS[@]}"; do
     echo "Building for target: $target"
-
-    # Build for specific target
     cargo build --release --target "$target"
 
-    # Create attestation for this target
-    sealedge-attest --file "target/${target}/release/my-app" \
-                     --builder-id "${BUILDER_ID}-${target}" \
-                     --output "releases/my-app-${target}.seal" \
-                     --verbose
+    seal attest-sbom \
+      --binary "target/${target}/release/my-app" \
+      --sbom bom.json \
+      --device-key build.key \
+      --device-pub build.pub \
+      --out "releases/my-app-${target}.se-attestation.json" \
+      --unencrypted
 
     echo "✔ Attestation created for $target"
 done

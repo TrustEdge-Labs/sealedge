@@ -11,14 +11,20 @@ Live audio capture, processing, and streaming examples for Sealedge.
 
 ## Live Audio Capture
 
+> These examples require a build with the `audio` feature
+> (`cargo build -p sealedge-cli --features audio`). Encrypt mode always needs
+> `--out` (a round-trip copy of the captured PCM); send it to `/dev/null` when
+> you only want the encrypted envelope.
+
 **Basic audio capture:**
 ```bash
 # List available audio devices
-./target/release/sealedge-core --list-audio-devices
+./target/release/sealedge --list-audio-devices
 
 # Capture 10 seconds of audio
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
+  --out /dev/null \
   --envelope voice_note.seal \
   --key-out voice_key.hex \
   --max-duration 10
@@ -28,11 +34,15 @@ Live audio capture, processing, and streaming examples for Sealedge.
 
 ### Voice Memo Recording
 
+> The keyring flags (`--use-keyring`, `--backend keyring`) require a build with
+> the `keyring` feature in addition to `audio`.
+
 ```bash
 # Quick voice note with system keyring
-./target/release/sealedge-core \
-  --audio-capture \
-  --duration 30 \
+./target/release/sealedge \
+  --live-capture \
+  --out /dev/null \
+  --max-duration 30 \
   --envelope voice_note_$(date +%Y%m%d_%H%M%S).seal \
   --backend keyring \
   --salt-hex "voice_notes_salt_1234567890abcdef" \
@@ -43,13 +53,14 @@ Live audio capture, processing, and streaming examples for Sealedge.
 
 ```bash
 # Professional audio recording with device selection
-./target/release/sealedge-core --list-devices
+./target/release/sealedge --list-audio-devices
 
-# Record from professional interface
-./target/release/sealedge-core \
-  --audio-capture \
-  --device 1 \
-  --duration 1800 \
+# Record from professional interface (copy the device name from the list above)
+./target/release/sealedge \
+  --live-capture \
+  --out /dev/null \
+  --audio-device "USB Audio Device" \
+  --max-duration 1800 \
   --sample-rate 48000 \
   --channels 2 \
   --envelope studio_session.seal \
@@ -64,10 +75,12 @@ Live audio capture, processing, and streaming examples for Sealedge.
 #### Discovering Available Audio Devices
 ```bash
 # List all available audio input devices
-./target/release/sealedge-core --list-audio-devices --verbose
+./target/release/sealedge --list-audio-devices --verbose
 
 # Cross-platform device discovery
-./target/release/sealedge-core \
+./target/release/sealedge \
+  --live-capture \
+  --out /dev/null \
   --audio-device "Microphone (Realtek Audio)" \
   --sample-rate 44100 \
   --channels 1 \
@@ -84,9 +97,10 @@ Live audio capture, processing, and streaming examples for Sealedge.
 #### Testing Audio Device Access
 ```bash
 # Test minimal audio capture
-./target/release/sealedge-core \
-  --audio-capture \
-  --duration 1 \
+./target/release/sealedge \
+  --live-capture \
+  --out /dev/null \
+  --max-duration 1 \
   --envelope audio_test.seal \
   --key-out test.key \
   --verbose

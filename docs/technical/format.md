@@ -50,7 +50,7 @@ Offset | Size | Field   | Description
 **Byte Order**: Fixed bytes, no endianness concerns.
 
 **Validation**:
-- MAGIC must exactly match `[0x54, 0x52, 0x53, 0x54]`
+- MAGIC must exactly match `[0x53, 0x45, 0x41, 0x4C]` ("SEAL")
 - VERSION must be `0x01` (legacy) or `0x02` (current) for this specification
 
 **Failure Modes**:
@@ -421,7 +421,9 @@ See Section 8 for the deterministic test vector and golden hash used to validate
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2025-08-25 | Initial specification |
-| 2.0 | February 2026 | HKDF-SHA256 KDF, versioned envelope format, encrypted key files (SEALEDGE-KEY-V1), algorithm agility |
+| 2.0 | February 2026 | HKDF-SHA256 KDF, versioned envelope format, encrypted key files, algorithm agility |
+
+Encrypted key files are now `SEALEDGE-KEY-V2` (an Ed25519 signing key plus an independent X25519 key-agreement key, encrypted at rest with PBKDF2-HMAC-SHA256 + AES-256-GCM); the earlier single-key `SEALEDGE-KEY-V1` bundle is rejected.
 
 ---
 

@@ -14,21 +14,28 @@ Basic examples to get you started with Sealedge encryption and decryption.
 ## Simple File Encryption
 
 **Basic file encryption with random key:**
+
+> Encrypt mode always requires `--out`. It receives a round-trip copy of the
+> plaintext (a self-check); the encrypted envelope goes to `--envelope`. Send
+> `--out` to `/dev/null` when you only want the envelope.
+
 ```bash
 # Development (from workspace root)
-cargo run -p sealedge-core -- \
+cargo run -p sealedge-cli -- \
   --input document.txt \
+  --out /dev/null \
   --envelope document.seal \
   --key-out mykey.hex
 
 # OR using installed binary
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input document.txt \
+  --out /dev/null \
   --envelope document.seal \
   --key-out mykey.hex
 
 # Decrypt the document
-cargo run -p sealedge-core -- \
+cargo run -p sealedge-cli -- \
   --decrypt \
   --input document.seal \
   --out recovered.txt \
@@ -46,19 +53,26 @@ diff document.txt recovered.txt  # Should be identical
 ```
 
 **Keyring-based encryption (password-derived keys):**
+
+> Requires a build with the `keyring` feature
+> (`cargo build -p sealedge-cli --features keyring`); otherwise `--set-passphrase`,
+> `--use-keyring`, and `--backend keyring` fail with a "requires the 'keyring'
+> feature" error.
+
 ```bash
 # One-time setup: store passphrase in OS keyring
-cargo run -p sealedge-core -- --set-passphrase "my secure passphrase"
+cargo run -p sealedge-cli --features keyring -- --set-passphrase "my secure passphrase"
 
 # Encrypt using keyring-derived key
-cargo run -p sealedge-core -- \
+cargo run -p sealedge-cli --features keyring -- \
   --input file.txt \
+  --out /dev/null \
   --envelope file.seal \
   --use-keyring \
   --salt-hex $(openssl rand -hex 16)
 
 # Decrypt using keyring (you'll be prompted for passphrase if needed)
-cargo run -p sealedge-core -- \
+cargo run -p sealedge-cli --features keyring -- \
   --decrypt \
   --input file.seal \
   --out recovered.txt \
@@ -74,10 +88,10 @@ cargo run -p sealedge-core -- \
 echo '{"message": "Hello Sealedge!", "timestamp": 1234567890}' > data.json
 
 # Encrypt the JSON file
-cargo run -p sealedge-core -- --input data.json --envelope data.seal --key-out key.hex
+cargo run -p sealedge-cli -- --input data.json --out /dev/null --envelope data.seal --key-out key.hex
 
 # Inspect without decrypting
-cargo run -p sealedge-core -- --input data.seal --inspect --verbose
+cargo run -p sealedge-cli -- --input data.seal --inspect --verbose
 
 # Example output:
 # Sealedge Archive Information:
@@ -92,7 +106,7 @@ cargo run -p sealedge-core -- --input data.seal --inspect --verbose
 **Format-aware decryption:**
 ```bash
 # Decrypt preserves original format
-cargo run -p sealedge-core -- \
+cargo run -p sealedge-cli -- \
   --decrypt \
   --input data.seal \
   --out recovered.json \
@@ -107,7 +121,7 @@ cat recovered.json | jq .  # Pretty-print JSON
 **Basic audio capture:**
 ```bash
 # List available audio devices
-./target/release/sealedge-core --list-audio-devices
+./target/release/sealedge --list-audio-devices
 
 # Example output:
 # Available Audio Devices:
@@ -115,15 +129,16 @@ cat recovered.json | jq .  # Pretty-print JSON
 #   1: Built-in Microphone
 #   2: USB Audio Device
 
-# Capture 10 seconds of audio
-./target/release/sealedge-core \
+# Capture 10 seconds of audio (requires a build with --features audio)
+./target/release/sealedge \
   --live-capture \
+  --out /dev/null \
   --envelope voice_note.seal \
   --key-out voice_key.hex \
   --max-duration 10
 
 # Decrypt captured audio (produces raw PCM data)
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input voice_note.seal \
   --out recovered_audio.raw \
@@ -136,17 +151,18 @@ ffmpeg -f f32le -ar 44100 -ac 1 -i recovered_audio.raw recovered_audio.wav
 **Advanced audio capture with specific device and quality:**
 ```bash
 # High-quality stereo capture from specific device
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
+  --out /dev/null \
   --audio-device "hw:CARD=USB_AUDIO,DEV=0" \
   --sample-rate 48000 \
   --channels 2 \
   --envelope stereo_voice.seal \
-  --use-keyring \
+  --key-out stereo_key.hex \
   --max-duration 30
 
 # The captured audio maintains format information
-./target/release/sealedge-core --input stereo_voice.seal --inspect
+./target/release/sealedge --input stereo_voice.seal --inspect
 
 # Example output:
 # Sealedge Archive Information:
@@ -177,8 +193,8 @@ ffmpeg -f f32le -ar 44100 -ac 1 -i recovered_audio.raw recovered_audio.wav
 # Connect client with authentication
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input file.txt \
-  --require-auth \
+  --file file.txt \
+  --enable-auth \
   --verbose
 
 # Client will perform mutual authentication and transfer the file securely

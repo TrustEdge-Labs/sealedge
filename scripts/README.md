@@ -7,26 +7,26 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 
 # Sealedge Scripts
 
-Utility scripts for Sealedge project management, testing, and development workflows.
+Utility scripts for Sealedge development, testing, documentation, and demos.
 
 ## 📁 Directory Structure
 
 ```
 scripts/
-├── ci-check.sh            # Pre-commit CI validation script
-├── fast-bench.sh          # Fast performance benchmarks for development
+├── ci-check.sh            # Pre-commit CI validation (mirrors GitHub CI)
+├── pre-commit.sh          # Git pre-commit hook checks
+├── fast-bench.sh          # Fast local performance benchmarks
 ├── fix-copyright.sh       # Copyright header maintenance
-├── pre-commit.sh          # Git pre-commit hooks
-├── check_documentation.sh # Documentation validation and checking
-├── check_project_status.sh # Project status and health checking
-├── setup_github_project.sh # GitHub project setup and configuration
-├── project/               # Project management and GitHub utilities
-│   ├── check-status.sh    # Check GitHub issues and project status
-│   ├── setup-github.sh    # Setup GitHub milestones, labels, and project
-│   ├── manage-board.sh    # Manage project board items and synchronization
-│   └── check-docs.sh      # Validate documentation status and consistency
-└── testing/               # Testing and validation scripts
-    └── test-day9.sh       # Test Day 9 network resilience features
+├── build-wasm-demo.sh     # Build the seal-wasm module for the web/demo verifier
+├── demo.sh                # End-to-end demo (keygen, wrap, verify; supports --local)
+├── demo-attestation.sh    # End-to-end SBOM attestation demo
+├── generate-types.sh      # Generate web/dashboard TypeScript types from JSON Schema
+├── consolidate-docs.sh    # Documentation consolidation helper
+├── test-inventory.sh      # Generate a per-crate/per-module test inventory baseline
+├── validate-v6.sh         # Full v6.0 validation gate (feature matrix + WASM/dashboard/e2e)
+└── project/               # Project maintenance utilities
+    ├── add-copyright.sh   # Add copyright headers to source files
+    └── check-docs.sh      # Documentation status/consistency check
 ```
 
 ## 🚀 Quick Start
@@ -37,23 +37,17 @@ All scripts should be run from the project root directory:
 # Run pre-commit CI checks (prevents GitHub CI failures)
 ./scripts/ci-check.sh
 
-# Check documentation status and validation
-./scripts/check_documentation.sh
+# End-to-end demo (add --local to skip server verification)
+./scripts/demo.sh --local
 
-# Check project status and health
-./scripts/check_project_status.sh
+# Build the WASM verifier demo
+./scripts/build-wasm-demo.sh
 
-# Setup GitHub project (initial configuration)
-./scripts/setup_github_project.sh
+# Fast local benchmarks
+./scripts/fast-bench.sh
 
-# Advanced project management
-./scripts/project/check-status.sh
-./scripts/project/setup-github.sh
-./scripts/project/manage-board.sh
+# Documentation status check
 ./scripts/project/check-docs.sh
-
-# Test network features
-./scripts/testing/test-day9.sh
 ```
 
 ## 📋 Script Categories
@@ -61,26 +55,25 @@ All scripts should be run from the project root directory:
 ### Core Development
 Scripts for daily development workflows:
 
-- **ci-check.sh**: Pre-commit CI validation script that runs the exact same checks as GitHub CI to prevent failures
-- **fast-bench.sh**: Fast performance benchmarks for development (local-only, no CI integration)
+- **ci-check.sh**: Pre-commit CI validation that runs the same checks as GitHub CI to prevent failures
+- **pre-commit.sh**: Git pre-commit hook checks for code quality
+- **fast-bench.sh**: Fast performance benchmarks for local development (local-only, no CI integration)
 - **fix-copyright.sh**: Automated copyright header maintenance
-- **pre-commit.sh**: Git pre-commit hooks for code quality
-- **check_documentation.sh**: Documentation validation and consistency checking
-- **check_project_status.sh**: Project health monitoring and status reporting
-- **setup_github_project.sh**: Initial GitHub project setup and configuration
+- **validate-v6.sh**: Full v6.0 validation gate mirroring the CI feature matrix plus WASM, dashboard build, docker-compose e2e, and demo roundtrip
 
-### Project Management (`project/`)
-Scripts for managing the GitHub project, issues, and documentation:
+### Demos
+- **demo.sh**: End-to-end demo — keygen, wrap, local verify, and optional server verify. Supports `--local` (skip server) and `--docker`
+- **demo-attestation.sh**: End-to-end SBOM attestation demo — keygen, SBOM generation (syft), attest, and local/remote verification
 
-- **check-status.sh**: Monitor GitHub issues and development progress
-- **setup-github.sh**: Initialize GitHub milestones, labels, and project structure
-- **manage-board.sh**: Manage project board items and synchronization
-- **check-docs.sh**: Validate documentation currency and cross-references
+### Build & Codegen
+- **build-wasm-demo.sh**: Build the `seal-wasm` module into `web/demo/pkg` for the browser verifier
+- **generate-types.sh**: Generate TypeScript interfaces (`web/dashboard/src/lib/types.ts`) from the `sealedge-types` JSON Schema fixtures
 
-### Testing (`testing/`)
-Scripts for testing and validation:
-
-- **test-day9.sh**: Comprehensive testing of Day 9 network resilience features
+### Documentation & Inventory
+- **consolidate-docs.sh**: Documentation consolidation helper
+- **test-inventory.sh**: Generate a test inventory with per-crate and per-module granularity for baseline diffing
+- **project/add-copyright.sh**: Add consistent copyright headers to all source files
+- **project/check-docs.sh**: Validate documentation status and consistency
 
 ## 🚀 Performance Benchmarking
 
@@ -94,42 +87,38 @@ Quick performance benchmarks for local development (no CI integration).
 ./scripts/fast-bench.sh [crypto|network|all]
 
 # Examples
-./scripts/fast-bench.sh              # All benchmarks (~1 minute)
-./scripts/fast-bench.sh crypto       # Crypto only (~45 seconds) 
-./scripts/fast-bench.sh network      # Network only (~15 seconds)
+./scripts/fast-bench.sh              # All benchmarks (default)
+./scripts/fast-bench.sh crypto       # Crypto benchmarks only
+./scripts/fast-bench.sh network      # Network benchmarks only
 ```
 
 **Features:**
-- **Fast execution** (~1 minute vs 15 minutes for full benchmarks)
+- **Fast execution** (quick checks, not statistically rigorous)
 - **Local development only** (never runs in CI)
-- **Basic accuracy** (suitable for performance trend monitoring)
-- **Automatic environment setup** (sets BENCH_FAST=1)
+- **Automatic environment setup** (sets `BENCH_FAST=1`)
 
 For full statistical accuracy, use `cargo bench` in the `crates/core/` directory.
 
-## 🛠️ Adding New Scripts
-
 ## 🔧 Requirements
 
-- **GitHub CLI** (`gh`) for project management scripts
 - **Bash** shell environment
-- **OpenSSL** for cryptographic operations in tests
-- **Cargo/Rust** toolchain for building test targets
+- **Cargo/Rust** toolchain for building and testing
+- **OpenSSL** for cryptographic operations in demos
+- **wasm-pack** for `build-wasm-demo.sh`
+- **Node.js/npx** for `generate-types.sh`
+- **syft** for `demo-attestation.sh`
 
 ## 📝 Contributing
 
 When adding new scripts:
 
-1. **Choose appropriate directory** (`project/` vs `testing/`)
-2. **Use kebab-case naming** (`new-script.sh`)
-3. **Make executable** (`chmod +x`)
-4. **Add description** to this README
-5. **Include usage examples** in script headers
+1. **Use kebab-case naming** (`new-script.sh`)
+2. **Make executable** (`chmod +x`)
+3. **Add a description** to this README
+4. **Include usage examples** in the script header
 
 ## 📚 Documentation
 
 For detailed usage and examples, see:
 
-- [DEVELOPMENT.md](../DEVELOPMENT.md) - Development workflows
-- [EXAMPLES.md](../EXAMPLES.md) - Usage examples with scripts
 - [CONTRIBUTING.md](../CONTRIBUTING.md) - Contribution guidelines

@@ -6,9 +6,10 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 -->
 
 
-# Sealedge P0 WASM Demo
+# Sealedge WASM Verifier Demo
 
-This directory contains a WebAssembly-powered demo for verifying Sealedge P0 `.seal` archives in the browser.
+This directory contains a WebAssembly-powered demo for verifying Sealedge `.seal`
+archives (`trst_version` 0.2.0) in the browser.
 
 > **📚 For complete WASM documentation**, see:
 > - **[WASM.md](../../WASM.md)** - Comprehensive build/test/deploy guide
@@ -18,6 +19,7 @@ This directory contains a WebAssembly-powered demo for verifying Sealedge P0 `.s
 
 - **Client-side verification**: No server required - all verification runs in the browser
 - **Ed25519 signature verification**: Cryptographic validation of archive signatures
+- **Version gating**: Accepts only `trst_version` 0.2.0; rejects legacy `0.1.0` and unknown versions
 - **Continuity chain checking**: Validates that all expected chunk files are present
 - **Directory upload**: Select entire `.seal` directories using modern browser APIs
 - **Real-time feedback**: Visual indicators for pass/fail status
@@ -72,14 +74,22 @@ For convenience, you can also run:
    ```bash
    # From project root
    head -c 4M </dev/urandom > test-input.bin
-   cargo run -p sealedge-seal-cli -- wrap --profile cam.video --in test-input.bin --out test-archive.seal
+
+   # Generate a device keypair (plaintext bundle for a quick demo)
+   cargo run -p sealedge-seal-cli -- keygen --out-key device.key --out-pub device.pub --unencrypted
+
+   # Wrap the input into a signed, encrypted archive
+   cargo run -p sealedge-seal-cli -- wrap --profile cam.video \
+     --in test-input.bin --out test-archive.seal \
+     --device-key device.key --unencrypted
    ```
 
 2. **Open the demo** in a modern browser (Chrome 86+, Edge 86+ recommended)
 
 3. **Select archive**: Click "Select .seal Archive Directory" and choose your `.seal` folder
 
-4. **Enter public key**: Paste the device public key from `device.pub`
+4. **Enter public key**: Paste the **signing** (`ed25519:`) line from `device.pub`
+   (the `.pub` file has two lines — an `ed25519:` line and an `x25519:` line)
 
 5. **Verify**: Click "Verify Archive" to see the results
 
@@ -101,17 +111,20 @@ The WASM module exposes two main functions:
 - **`verify_manifest(manifest_bytes, device_pub)`**: Verifies a manifest file directly
 - **`verify_archive(dir_handle, device_pub)`**: Verifies a complete archive directory
 
+Both reject any archive whose `trst_version` is not 0.2.0, and return a
+`VerificationResult` of `{ signature, continuity, segment_count }`.
+
 ### Security Model
 
+- **Version gating**: Legacy (`0.1.0`) and unknown archive versions are rejected before signature checks
 - **Signature verification**: Uses Ed25519 cryptography to validate manifest signatures
-- **Continuity checking**: Ensures all expected chunk files are present (P0 level)
+- **Continuity checking**: Ensures all expected chunk files are present
 - **No decryption**: This demo only verifies signatures and structure (no data decryption)
 
-### Limitations (P0)
+### Limitations
 
-- **Basic continuity**: Only checks file existence, not full hash validation
-- **No chunk decryption**: Encrypted chunk contents are not validated
-- **Single profile**: Only supports `cam.video` profile
+- **Basic continuity**: Only checks that each expected chunk file exists, not full chunk-hash validation
+- **No chunk decryption**: Encrypted chunk contents are not read or validated
 
 ## 🧪 Testing
 
@@ -120,13 +133,14 @@ The WASM module exposes two main functions:
 1. Create test archives with different configurations:
    ```bash
    # Valid archive
-   cargo run -p sealedge-seal-cli -- wrap --profile cam.video --in test.bin --out valid.seal
+   cargo run -p sealedge-seal-cli -- wrap --profile cam.video \
+     --in test.bin --out valid.seal --device-key device.key --unencrypted
 
-   # Test verification
-   cargo run -p sealedge-seal-cli -- verify valid.seal --device-pub $(cat device.pub)
+   # Test verification (use the ed25519 line from device.pub)
+   cargo run -p sealedge-seal-cli -- verify valid.seal --device-pub "$(grep '^ed25519:' device.pub)"
    ```
 
-2. Test with wrong public key to verify failure detection
+2. Test with a wrong public key to verify failure detection
 
 3. Remove chunk files to test continuity checking
 
@@ -158,7 +172,8 @@ To deploy the demo:
 
 - **"Directory selection not working"**: Use Chrome/Edge 86+ or test with individual files
 - **"WASM module failed to load"**: Check browser console for CORS errors
-- **"Verification always fails"**: Ensure public key format starts with `ed25519:`
+- **"Verification always fails"**: Ensure the public key is the `ed25519:` line from `device.pub`
+- **"unsupported archive version"**: The archive is not `trst_version` 0.2.0; re-wrap with a current `seal` build
 
 ### Performance
 
@@ -168,11 +183,11 @@ To deploy the demo:
 
 ## 📚 Related Documentation
 
-- **[P0 Implementation Status](../../P0_IMPLEMENTATION.md)** - Complete P0 progress
-- **[CLI Documentation](../../crates/seal-cli/)** - Command-line interface
-- **[Core API Documentation](../../crates/core/)** - Low-level verification APIs
+- **[C4 content-encryption design](../../docs/designs/c4-content-encryption-redesign.md)** - The 0.2.0 content-encryption model
+- **[seal CLI](../../crates/seal-cli/)** - Command-line interface
+- **[Core API](../../crates/core/)** - Low-level verification APIs
 - **[Examples](../../examples/cam.video/)** - End-to-end usage examples
 
 ---
 
-*This demo showcases the P0 implementation of Sealedge .seal archive verification in WebAssembly.*
+*This demo showcases Sealedge `.seal` (`trst_version` 0.2.0) archive verification in WebAssembly.*

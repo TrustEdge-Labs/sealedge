@@ -12,7 +12,7 @@ Comprehensive error handling, common issues, and diagnostic procedures for Seale
 ## Table of Contents
 - [Common Error Messages](#common-error-messages)
 - [Configuration Issues](#configuration-issues)
-- [Universal Backend Issues](#universal-backend-issues)
+- [Backend Issues](#backend-issues)
 - [Network Problems](#network-problems)
 - [Authentication Issues](#authentication-issues)
 - [Audio System Issues](#audio-system-issues)
@@ -40,7 +40,7 @@ Error: open envelope. Caused by: No such file or directory (os error 2)
 ls -la your_file.seal
 
 # Use absolute path if needed
-./target/release/sealedge-client --input /full/path/to/file.seal
+./target/release/sealedge-client --file /full/path/to/file.seal
 ```
 
 [↑ Back to top](#table-of-contents)
@@ -51,24 +51,22 @@ ls -la your_file.seal
 
 ### Backend Configuration
 
-#### `Backend capability not available`
+#### `Operation not supported by available backends`
 **Error Example:**
 ```
 Error: Operation not supported by available backends
-Available backends: keyring, universal_keyring
-Required capability: AdvancedHashing
 ```
 
 **Solution:**
 ```bash
-# List available backends with capabilities
-sealedge-core --list-backends
+# List available key-management backends
+sealedge --list-backends
 
-# Check specific backend capabilities
-sealedge-core --backend-info universal_keyring
+# Select a specific backend (keyring, tpm, hsm, matter)
+sealedge --input file.txt --out /dev/null --envelope file.seal --backend hsm --key-out key.hex
 
-# Use backend with required capabilities
-sealedge-core --backend-preference "hashing:universal_keyring"
+# Pass backend-specific settings (repeatable key=value)
+sealedge --input file.txt --out /dev/null --envelope file.seal --backend tpm --backend-config "device=/dev/tpm0"
 ```
 
 ### Salt Format Issues
@@ -97,328 +95,52 @@ openssl rand -hex 16
 
 ---
 
-## Universal Backend Issues
+## Backend Issues
 
-### Registry Initialization Failures
+The `sealedge` envelope CLI selects a key-management backend with `--backend`
+(valid values: `keyring` (default), `tpm`, `hsm`, `matter`). There is no backend
+"registry" CLI — the surface is `--list-backends`, `--backend`, and
+`--backend-config key=value`.
 
-#### `Failed to initialize Universal Backend Registry`
+#### `Operation not supported by available backends`
 
-**Error Example:**
-```
-Error: Backend registry initialization failed
-Caused by: universal_registry backend not available
-```
-
-**Cause:** The Universal Backend Registry failed to initialize properly, usually due to:
-- Missing backend dependencies
-- Insufficient system permissions
-- Corrupted backend configuration
+**Cause:** The requested backend is not available in this build, or the chosen
+backend cannot perform the operation.
 
 **Solution:**
 ```bash
-# Check registry status
-sealedge-core --list-backends
+# See which backends this build supports
+sealedge --list-backends
 
-# If empty or error, verify system dependencies
-# Linux: Check keyring service
-systemctl status gnome-keyring-daemon
-# or
-systemctl status kwallet
-
-# Reset registry configuration
-rm -rf ~/.config/sealedge/backend_registry.json
-
-# Force registry reinitialization
-sealedge-core --backend-info universal_registry
+# Encrypt with a generated key (works in any build)
+sealedge --input file.txt --out /dev/null --envelope file.seal --key-out file.key
 ```
 
-#### `Backend registration failed: capability conflict`
+The `keyring` backend (and `--use-keyring` / `--set-passphrase`) requires a build
+with the `keyring` feature: `cargo build -p sealedge-cli --features keyring`.
+Without it these commands fail with a clear "requires the 'keyring' feature" error.
 
-**Error Example:**
-```
-Error: Failed to register backend 'custom_backend'
-Caused by: Capability 'KeyDerivation' conflicts with existing backend 'universal_keyring'
-```
+#### Passing backend configuration
 
-**Cause:** Multiple backends trying to register the same capability with conflicting configurations.
-
-**Solution:**
-```bash
-# Check current backend registrations
-sealedge-core --list-backends
-
-# Manually specify backend preferences to resolve conflicts
-sealedge-core --backend-preference "keyderivation:universal_keyring"
-
-# Or use explicit backend selection
-sealedge-core --backend-info universal_keyring
-```
-
-#### `Registry corruption detected`
-
-**Error Example:**
-```
-Error: Backend registry corrupted
-Caused by: Invalid registry state - checksum mismatch
-```
-
-**Cause:** Registry metadata file corruption, often from:
-- Improper shutdown during registry updates
-- Filesystem corruption
-- Concurrent access conflicts
-
-**Solution:**
-```bash
-# Backup current registry (if recoverable)
-cp ~/.config/sealedge/backend_registry.json ~/.config/sealedge/backend_registry.json.backup
-
-# Remove corrupted registry
-rm -rf ~/.config/sealedge/backend_registry.json
-
-# Force clean reinitialization
-sealedge-core --list-backends --verbose
-
-# Verify registry health
-sealedge-core --backend-info universal_registry
-```
-
-### Capability Mismatch Errors
-
-#### `Operation not supported by selected backend`
-
-**Error Example:**
-```
-Error: KeyDerivation operation failed
-Caused by: Backend 'basic_keyring' does not support capability 'AdvancedHashing'
-```
-
-**Cause:** Requested operation requires capabilities not available in the selected backend.
-
-**Solution:**
-```bash
-# Check which backends support the required capability
-sealedge-core --list-backends | grep -A 5 "Capabilities.*Hashing"
-
-# Use a backend with the required capability
-sealedge-core --backend-preference "hashing:universal_keyring"
-
-# Or let the registry auto-select
-sealedge-core --show-operation-flow
-```
-
-#### `Capability version mismatch`
-
-**Error Example:**
-```
-Error: Backend capability version conflict
-Caused by: Required KeyDerivation v2.0, but backend provides v1.5
-```
-
-**Cause:** Backend provides an older version of the required capability.
-
-**Solution:**
-```bash
-# Check available capability versions
-sealedge-core --backend-info universal_keyring | grep -A 10 "Capabilities"
-
-# Update to a backend with newer capability versions
-sealedge-core --backend-preference "keyderivation:universal_keyring"
-
-# Check if system updates are available
-# Update Sealedge to latest version for newest capabilities
-```
-
-#### `No backend available for operation`
-
-**Error Example:**
-```
-Error: Operation dispatch failed
-Caused by: No registered backend supports capability 'QuantumResistantHashing'
-```
-
-**Cause:** No currently registered backend supports the required capability.
-
-**Solution:**
-```bash
-# List all available backends and their capabilities
-sealedge-core --list-backends
-
-# Check if a fallback capability can be used
-sealedge-core --backend-preference "hashing:universal_keyring"
-
-# For future capabilities, check for Sealedge updates
-# Some capabilities may require specific backend plugins
-```
-
-### Backend Selection Problems
-
-#### `Backend selection timeout`
-
-**Error Example:**
-```
-Error: Backend selection failed
-Caused by: Registry timeout after 30 seconds
-```
-
-**Cause:** Registry taking too long to select an appropriate backend, usually due to:
-- Backend health checks timing out
-- Network latency for remote backends
-- Heavy system load
-
-**Solution:**
-```bash
-# Check backend health status
-sealedge-core --backend-info universal_registry | grep -A 20 "Health Monitoring"
-
-# Manually specify a known-good backend
-sealedge-core --backend-preference "keyderivation:keyring"
-
-# Reduce timeout for testing
-sealedge-core --backend-config "selection_timeout=10"
-
-# Check system resources
-top -p $(pgrep sealedge)
-```
-
-#### `Circular backend dependency detected`
-
-**Error Example:**
-```
-Error: Backend dependency resolution failed
-Caused by: Circular dependency: universal_keyring -> keyring -> universal_keyring
-```
-
-**Cause:** Backend configuration creates circular dependencies in capability routing.
-
-**Solution:**
-```bash
-# Check current backend routing configuration
-sealedge-core --backend-info universal_registry | grep -A 15 "Operation Routing"
-
-# Reset to default routing preferences
-rm -rf ~/.config/sealedge/backend_preferences.json
-
-# Use explicit, non-circular preferences
-sealedge-core --backend-preference "keyderivation:universal_keyring"
-sealedge-core --backend-preference "storage:keyring"
-```
-
-#### `Backend performance degradation`
-
-**Error Example:**
-```
-Warning: Backend 'universal_keyring' performance below threshold
-Average latency: 2.5s (threshold: 1.0s)
-Switching to fallback backend 'keyring'
-```
-
-**Cause:** Selected backend is performing poorly, triggering automatic failover.
-
-**Diagnostic Steps:**
-```bash
-# Check detailed performance metrics
-sealedge-core --backend-info universal_registry | grep -A 20 "Performance Analysis"
-
-# Monitor real-time performance
-sealedge-core --backend-config "performance_monitoring=detailed" --verbose
-
-# Check system resources affecting the backend
-# Memory usage
-free -h
-# CPU usage
-top -p $(pgrep sealedge)
-# Disk I/O
-iostat -x 1 5
-```
-
-**Solutions:**
-```bash
-# Optimize backend configuration for performance
-sealedge-core --backend-config "pbkdf2_iterations=100000"  # Reduce iterations
-sealedge-core --backend-config "argon2_memory=32768"      # Reduce memory usage
-
-# Use performance-optimized backend preference
-sealedge-core --backend-preference "keyderivation:keyring"  # Faster backend
-
-# Increase performance thresholds if acceptable
-sealedge-core --backend-config "performance_threshold=2000"  # 2 second threshold
-```
-
-### Registry Maintenance and Recovery
-
-#### Emergency Backend Reset
+Some backends accept extra settings via one or more `--backend-config key=value`
+flags:
 
 ```bash
-# Complete registry reset (nuclear option)
-echo "Performing complete backend registry reset..."
-
-# 1. Stop any running Sealedge processes
-pkill sealedge
-
-# 2. Backup current configuration
-mkdir -p ~/.config/sealedge/backup/$(date +%Y%m%d_%H%M%S)
-cp -r ~/.config/sealedge/*.json ~/.config/sealedge/backup/$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true
-
-# 3. Remove all registry files
-rm -rf ~/.config/sealedge/backend_registry.json
-rm -rf ~/.config/sealedge/backend_preferences.json
-rm -rf ~/.config/sealedge/backend_cache.json
-
-# 4. Reinitialize with defaults
-sealedge-core --list-backends
-
-# 5. Verify registry health
-sealedge-core --backend-info universal_registry
+sealedge \
+  --input file.txt \
+  --out /dev/null \
+  --envelope file.seal \
+  --backend tpm \
+  --backend-config "device=/dev/tpm0"
 ```
 
-#### Registry Health Check Script
+#### YubiKey hardware
 
-```bash
-#!/bin/bash
-# Backend Health Check Script
+The `sealedge` envelope CLI does not sign with a YubiKey. Hardware signing is
+provided by the `seal` archive tool (`seal wrap --backend yubikey --sign-only`,
+built with `--features yubikey`). See
+[Backend Examples](examples/backends.md#yubikey-hardware-signing-seal-archives).
 
-echo "🔍 Sealedge Backend Health Check"
-echo "================================="
-
-# Check registry status
-echo "📊 Registry Status:"
-if sealedge-core --list-backends >/dev/null 2>&1; then
-    echo "  ✅ Registry accessible"
-    
-    # Count registered backends
-    BACKEND_COUNT=$(sealedge-core --list-backends 2>/dev/null | grep -c "✓.*Backend")
-    echo "  📊 Backends registered: $BACKEND_COUNT"
-    
-    # Check each backend health
-    echo "🔍 Backend Health:"
-    sealedge-core --backend-info universal_registry | grep -A 5 "Backend Health"
-    
-    # Performance check
-    echo "⚡ Performance Check:"
-    START_TIME=$(date +%s%N)
-    sealedge-core --backend-info keyring >/dev/null 2>&1
-    END_TIME=$(date +%s%N)
-    DURATION=$((($END_TIME - $START_TIME) / 1000000))  # Convert to milliseconds
-    
-    if [ $DURATION -lt 1000 ]; then
-        echo "  ✅ Backend response time: ${DURATION}ms (healthy)"
-    else
-        echo "  ⚠️  Backend response time: ${DURATION}ms (slow)"
-    fi
-    
-else
-    echo "  ❌ Registry inaccessible - requires attention"
-    echo "  💡 Try: sealedge-core --list-backends --verbose"
-fi
-
-echo ""
-echo "🎯 Quick Fix Commands:"
-echo "  Reset registry: rm ~/.config/sealedge/backend_registry.json"
-echo "  Reinitialize: sealedge-core --list-backends"
-echo "  Health check: sealedge-core --backend-info universal_registry"
-```
-
-[↑ Back to top](#table-of-contents)
 
 ---
 
@@ -506,8 +228,8 @@ Connection attempt 2 failed: timeout after 15s
 # Add authentication to client
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input data.wav \
-  --require-auth \
+  --file data.wav \
+  --enable-auth \
   --client-identity "My Client App"
 ```
 
@@ -529,23 +251,22 @@ rm *_identity.cert *.key
   --server-identity "Debug Server"
 
 ./target/release/sealedge-client \
-  --require-auth \
+  --enable-auth \
   --verbose \
   --client-identity "Debug Client"
 ```
 
 #### `Session expired - please reconnect`
-**Cause:** Session timeout exceeded (default: 300 seconds).
+**Cause:** The authenticated session is time-limited and has expired.
 
 **Solutions:**
 ```bash
-# Reconnect with fresh authentication
-./target/release/sealedge-client --require-auth --client-identity "Client"
-
-# Use longer session timeout for server
-./target/release/sealedge-server \
-  --require-auth \
-  --session-timeout 600  # 10 minutes
+# Reconnect with fresh authentication (a new ECDH session key is derived)
+./target/release/sealedge-client \
+  --server 127.0.0.1:8080 \
+  --file data.txt \
+  --enable-auth \
+  --client-identity "Client"
 ```
 
 [↑ Back to top](#table-of-contents)
@@ -562,7 +283,7 @@ rm *_identity.cert *.key
 **Solutions:**
 ```bash
 # Verify audio features are enabled
-./target/release/sealedge-core --help | grep -i audio
+./target/release/sealedge --help | grep -i audio
 
 # If missing, rebuild with audio features
 cargo build --release --features audio
@@ -584,11 +305,13 @@ sudo usermod -a -G audio $USER
 # Check current groups
 groups $USER
 
-# Test with PulseAudio
-./target/release/sealedge-core \
+# Test with PulseAudio (encrypt mode needs --out and a key; --out captures raw PCM)
+./target/release/sealedge \
   --live-capture \
   --audio-device "pulse" \
-  --max-duration 5
+  --max-duration 5 \
+  --out capture.raw \
+  --key-out capture.key
 ```
 
 #### `Audio device "device_name" not found`
@@ -597,18 +320,22 @@ groups $USER
 **Solutions:**
 ```bash
 # Always check available devices first
-./target/release/sealedge-core --list-audio-devices
+./target/release/sealedge --list-audio-devices
 
 # Copy device name exactly from the list
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "hw:CARD=USB_AUDIO,DEV=0" \
-  --max-duration 5
+  --max-duration 5 \
+  --out capture.raw \
+  --key-out capture.key
 
 # Use system default as fallback
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
-  --max-duration 5
+  --max-duration 5 \
+  --out capture.raw \
+  --key-out capture.key
 ```
 
 #### Silent Audio Capture
@@ -624,16 +351,20 @@ arecord -d 3 test_system.wav  # Linux
 sox -d test_system.wav trim 0 3  # macOS/Linux
 
 # Use verbose output for debugging
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --max-duration 5 \
+  --out capture.raw \
+  --key-out capture.key \
   --verbose
 
 # Try different sample rates
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --sample-rate 44100 \
-  --max-duration 5
+  --max-duration 5 \
+  --out capture.raw \
+  --key-out capture.key
 ```
 
 #### Decrypted Audio Not Playable
@@ -646,7 +377,7 @@ sox -d test_system.wav trim 0 3  # macOS/Linux
 **Solutions:**
 ```bash
 # For live audio captures: Always use .raw extension for clarity
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input live_audio.seal \
   --out audio.raw \
@@ -660,7 +391,7 @@ sox -d test_system.wav trim 0 3  # macOS/Linux
 ffmpeg -f f32le -ar 44100 -ac 2 -i audio.raw audio.wav
 
 # For file inputs: Use original extension
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input music_file.seal \
   --out music_file.mp3 \
@@ -693,14 +424,14 @@ hexdump -C encrypted.seal | head -1
 # Should start with magic bytes
 
 # 2. Test with known good key
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input encrypted.seal \
   --out test.txt \
   --key-hex "known_good_key_64_hex_chars"
 
 # 3. Test passphrase/salt combination
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input encrypted.seal \
   --out test.txt \
@@ -717,8 +448,9 @@ hexdump -C encrypted.seal | head -1
 file suspicious_file.seal
 
 # Verify file wasn't corrupted
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input original_file.txt \
+  --out /dev/null \
   --envelope new_envelope.seal \
   --key-hex $(openssl rand -hex 32)
 ```
@@ -737,7 +469,7 @@ file suspicious_file.seal
 **Diagnosis:**
 ```bash
 # Inspect file format detection
-./target/release/sealedge-core --input file.seal --inspect --verbose
+./target/release/sealedge --input file.seal --inspect --verbose
 
 # Check original file extension and content
 file original_file.pdf  # Should show PDF document
@@ -750,7 +482,7 @@ hexdump -C original_file.pdf | head -2  # Check file headers
 # but will show as binary data. This is expected behavior.
 
 # To verify correct handling:
-./target/release/sealedge-core --decrypt --input file.seal --out restored_file.pdf --key-hex $KEY
+./target/release/sealedge --decrypt --input file.seal --out restored_file.pdf --key-hex $KEY
 file restored_file.pdf  # Should match original type
 diff original_file.pdf restored_file.pdf  # Should be identical
 ```
@@ -766,7 +498,7 @@ diff original_file.pdf restored_file.pdf  # Should be identical
 **Verification:**
 ```bash
 # Check what MIME type was detected
-./target/release/sealedge-core --input file.seal --inspect
+./target/release/sealedge --input file.seal --inspect
 
 # Expected output:
 # MIME Type: application/pdf  (for PDF files)
@@ -780,7 +512,7 @@ diff original_file.pdf restored_file.pdf  # Should be identical
 
 ```bash
 # Inspect encrypted archive
-./target/release/sealedge-core --input suspicious_file.seal --inspect --verbose
+./target/release/sealedge --input suspicious_file.seal --inspect --verbose
 
 # Example output:
 # Sealedge Archive Information:
@@ -805,7 +537,7 @@ hexdump -C file.seal | head -1
 
 # Test with known good file
 cp known_good.seal test_copy.seal
-./target/release/sealedge-core --decrypt --input test_copy.seal
+./target/release/sealedge --input test_copy.seal --inspect
 ```
 
 #### Record Tampering Detection
@@ -816,14 +548,15 @@ cp known_good.seal test_copy.seal
 # Create test file
 echo "test data" > test.txt
 
-# Encrypt
-./target/release/sealedge-core \
+# Encrypt (save the key so the decrypt step below can reuse it)
+./target/release/sealedge \
   --input test.txt \
+  --out /dev/null \
   --envelope test.seal \
-  --key-hex $(openssl rand -hex 32)
+  --key-out last_key.hex
 
 # Verify encryption worked
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input test.seal \
   --out recovered.txt \
@@ -841,7 +574,7 @@ diff test.txt recovered.txt
 **Diagnosis:**
 ```bash
 # Check what type of data was originally encrypted
-./target/release/sealedge-core --input file.seal --inspect
+./target/release/sealedge --input file.seal --inspect
 
 # For file inputs (MP3, WAV, etc.):
 # Data Type: File
@@ -858,11 +591,11 @@ diff test.txt recovered.txt
 **Solution:**
 ```bash
 # File inputs preserve format automatically
-./target/release/sealedge-core --decrypt --input music.seal --out music.mp3 --key-hex $KEY
+./target/release/sealedge --decrypt --input music.seal --out music.mp3 --key-hex $KEY
 # Output: Playable MP3 file
 
 # Live audio requires conversion
-./target/release/sealedge-core --decrypt --input live_capture.seal --out audio.raw --key-hex $KEY
+./target/release/sealedge --decrypt --input live_capture.seal --out audio.raw --key-hex $KEY
 ffmpeg -f f32le -ar 44100 -ac 1 -i audio.raw audio.wav
 ```
 
@@ -875,7 +608,7 @@ hexdump -C file.seal | head -1
 
 # Test with known good file
 cp known_good.seal test_copy.seal
-./target/release/sealedge-core --decrypt --input test_copy.seal
+./target/release/sealedge --input test_copy.seal --inspect
 ```
 
 #### Record Tampering Detection
@@ -886,14 +619,15 @@ cp known_good.seal test_copy.seal
 # Create test file
 echo "test data" > test.txt
 
-# Encrypt
-./target/release/sealedge-core \
+# Encrypt (save the key so the decrypt step below can reuse it)
+./target/release/sealedge \
   --input test.txt \
+  --out /dev/null \
   --envelope test.seal \
-  --key-hex $(openssl rand -hex 32)
+  --key-out last_key.hex
 
 # Verify encryption worked
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input test.seal \
   --out recovered.txt \
@@ -923,11 +657,11 @@ Enable verbose output for detailed troubleshooting:
 # Client with debug output  
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input file.txt \
+  --file file.txt \
   --verbose
 
 # File encryption/decryption with format details
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input file.seal \
   --out restored.txt \
@@ -946,15 +680,15 @@ Enable verbose output for detailed troubleshooting:
 
 ```bash
 # Quick format check (no decryption)
-./target/release/sealedge-core --input file.seal --inspect
+./target/release/sealedge --input file.seal --inspect
 
 # Detailed format inspection
-./target/release/sealedge-core --input file.seal --inspect --verbose
+./target/release/sealedge --input file.seal --inspect --verbose
 
 # Compare multiple files
 for file in *.seal; do
   echo "=== $file ==="
-  ./target/release/sealedge-core --input "$file" --inspect
+  ./target/release/sealedge --input "$file" --inspect
   echo
 done
 ```
@@ -972,7 +706,7 @@ Gather system information for bug reports:
 
 ```bash
 # Sealedge version
-./target/release/sealedge-core --version
+./target/release/sealedge --version
 
 # System information
 uname -a
@@ -1001,12 +735,13 @@ rm -f *.seal *.hex *_identity.cert *.key
 echo "Hello Sealedge Testing" > test_input.txt
 
 # Test basic encryption/decryption
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input test_input.txt \
+  --out /dev/null \
   --envelope test.seal \
   --key-out test.key
 
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input test.seal \
   --out test_output.txt \
@@ -1060,7 +795,7 @@ If issues persist after following this guide:
 
 **Command that failed:**
 ```bash
-./target/release/sealedge-client --server 127.0.0.1:8080 --input file.txt
+./target/release/sealedge-client --server 127.0.0.1:8080 --file file.txt
 ```
 
 **Error output:**

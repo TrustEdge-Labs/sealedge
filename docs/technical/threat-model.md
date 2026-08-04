@@ -26,7 +26,7 @@ Sealedge is a cryptographic provenance system for edge device data. It proves th
 
 ```
 [Edge Device / CLI (seal)]
-    |-- keygen: SEALEDGE-KEY-V1 (PBKDF2-HMAC-SHA256 600k + AES-256-GCM, passphrase-protected)
+    |-- keygen: SEALEDGE-KEY-V2 (PBKDF2-HMAC-SHA256 600k + AES-256-GCM, passphrase-protected)
     |-- wrap: chunk data -> XChaCha20-Poly1305 + BLAKE3 chain -> Ed25519/ECDSA P-256 sign
     |-- unwrap: verify signature + BLAKE3 chain -> HKDF key derivation -> decrypt chunks
          |
@@ -63,7 +63,7 @@ platform-server (Rust, Axum HTTP) <-> postgres (internal network, no external po
 | Asset | Protection Mechanism |
 |-------|---------------------|
 | Archive content (plaintext data) | XChaCha20-Poly1305 per-chunk encryption at rest and in transit |
-| Device private keys | SEALEDGE-KEY-V1: PBKDF2-HMAC-SHA256 (600k iterations, 32-byte salt) + AES-256-GCM |
+| Device private keys | SEALEDGE-KEY-V2 (Ed25519 signing + independent X25519 key-agreement bundle): PBKDF2-HMAC-SHA256 (600k iterations, 32-byte salt) + AES-256-GCM |
 | Verification receipts | JWS-signed by platform server |
 | Platform JWT secret | Secret<T> wrapper with ZeroizeOnDrop; never serialized or logged |
 | PostgreSQL credentials | Secret<T> wrapper with ZeroizeOnDrop |
@@ -77,10 +77,10 @@ platform-server (Rust, Axum HTTP) <-> postgres (internal network, no external po
 |-----------|-----------|-----------|-------|
 | Signing (software) | Ed25519 | Archive manifest signing, mutual auth | `ed25519-dalek`; "ed25519:BASE64" wire prefix |
 | Signing (hardware) | ECDSA P-256 | YubiKey PIV slot 9c, YubiKey-generated X.509 certs | `yubikey` crate; "ecdsa-p256:BASE64" wire prefix |
-| Symmetric encryption | AES-256-GCM | Per-chunk envelope encryption; SEALEDGE-KEY-V1 key-at-rest | Authenticated encryption with 128-bit tags |
+| Symmetric encryption | AES-256-GCM | Per-chunk envelope encryption; SEALEDGE-KEY-V2 key-at-rest | Authenticated encryption with 128-bit tags |
 | Symmetric encryption | XChaCha20-Poly1305 | .seal chunk encryption (crypto.rs) | Extended nonce variant, resistant to nonce misuse |
 | Key derivation (envelope) | HKDF-SHA256 (RFC 5869) | v2 envelope key derivation | Single Extract+Expand, 40-byte OKM (32-byte AES key + 8-byte nonce prefix); info = "SEALEDGE_ENVELOPE_V1" |
-| Key derivation (at rest) | PBKDF2-HMAC-SHA256 | SEALEDGE-KEY-V1 key-at-rest; Keyring backend | 600,000 iterations (OWASP 2023); 32-byte salt; min 300,000 enforced |
+| Key derivation (at rest) | PBKDF2-HMAC-SHA256 | SEALEDGE-KEY-V2 key-at-rest; Keyring backend | 600,000 iterations (OWASP 2023); 32-byte salt; min 300,000 enforced |
 | Session key derivation | X25519 ECDH | Mutual-auth network transport session keys | BLAKE3 domain-separated KDF post-ECDH |
 | Hash / chain | BLAKE3 | Continuity chain (genesis seed: blake3("sealedge:genesis")), segment linking, receipt binding | Non-cryptographic-signing usage; collision resistance only |
 | Hybrid encryption | RSA-OAEP-SHA256 | Asymmetric encryption in hybrid.rs | Oaep::new::<sha2::Sha256>(); PKCS#1 v1.5 eliminated in v2.2 |
@@ -159,7 +159,7 @@ See **RSA Vulnerability History** section for full timeline.
 
 **Description**: An adversary performs offline brute-force or dictionary attacks against stored key material, or exploits incorrect use of a KDF for its input type.
 
-**Attack Vectors**: Offline dictionary attack against SEALEDGE-KEY-V1 files, rainbow tables, GPU brute-force.
+**Attack Vectors**: Offline dictionary attack against SEALEDGE-KEY-V2 files, rainbow tables, GPU brute-force.
 
 **Status**: MITIGATED
 

@@ -36,7 +36,7 @@ seal keygen --out-key device.key --out-pub device.pub --unencrypted
 # 2. Generate CycloneDX SBOM with syft
 syft ./my-binary -o cyclonedx-json > sbom.cdx.json
 
-# 3. Create attestation — binds binary hash + SBOM hash + full SBOM under Ed25519 signature
+# 3. Create attestation — binds the binary hash and SBOM hash under one Ed25519 signature
 seal attest-sbom \
   --binary ./my-binary \
   --sbom sbom.cdx.json \
@@ -47,7 +47,7 @@ seal attest-sbom \
 
 # 4. Verify locally (confirms signature and hash integrity before publishing)
 seal verify-attestation my-binary.se-attestation.json \
-  --device-pub "$(cat device.pub)"
+  --device-pub device.pub
 
 # 5. Upload attestation alongside your release binary
 gh release upload v1.0.0 my-binary.se-attestation.json
@@ -168,15 +168,19 @@ Each `.se-attestation.json` file is a JSON document with these fields:
 | Field | Description |
 |-------|-------------|
 | `format` | `te-point-attestation-v1` — format version discriminant |
-| `binary_hash` | BLAKE3 hash of the binary artifact (hex) |
-| `sbom_hash` | BLAKE3 hash of the CycloneDX SBOM (hex) |
-| `sbom_content` | Full SBOM contents (embedded, base64-encoded) |
-| `device_pub` | Ed25519 public key used to sign this attestation |
-| `signature` | Ed25519 signature over canonical JSON (base64) |
-| `nonce` | Random 16-byte nonce (replay prevention) |
-| `timestamp` | RFC 3339 creation timestamp |
+| `sealedge_version` | Crate version at signing time |
+| `timestamp` | ISO 8601 (RFC 3339) creation timestamp, millisecond precision |
+| `nonce` | Random 16-byte nonce, hex-encoded (replay prevention) |
+| `subject` | The binary artifact: `{ hash, filename, label }` |
+| `evidence` | The SBOM artifact: `{ hash, filename, label }` |
+| `public_key` | Ed25519 public key (`ed25519:<base64>`) used to sign this attestation |
+| `signature` | Ed25519 signature over canonical JSON (`ed25519:<base64>`) |
 
-The signature covers all fields except `signature` itself — canonical serialization uses stable struct field order. Verifiers need only the attestation file and the expected public key.
+Each artifact's `hash` is a BLAKE3 digest carrying a `b3:` prefix (`b3:<64-hex>`); `filename` is the base filename and `label` is a freeform tag (e.g. `"binary"`, `"sbom"`).
+
+The attestation stores only the BLAKE3 hashes of the binary and SBOM — the SBOM contents are **not** embedded. To confirm a file matches, a verifier supplies the file itself (see `--binary` / `--sbom` below), and its hash is recomputed and compared.
+
+The signature covers all fields except `signature` itself — canonical serialization uses stable struct field order. Verifiers need only the attestation file and the expected public key to check the signature.
 
 ## Encrypted Keys for Production
 
@@ -192,13 +196,10 @@ seal attest-sbom --binary ./firmware.bin --sbom sbom.cdx.json \
   --out firmware.se-attestation.json
 ```
 
-For hardware-backed keys, the YubiKey PIV backend is available:
+To confirm the attested files match, a verifier supplies them alongside the public key — their hashes are recomputed and compared against the attestation:
 
 ```bash
-seal attest-sbom --binary ./firmware.bin --sbom sbom.cdx.json \
-  --backend yubikey \
-  --device-key device.key --device-pub device.pub \
-  --out firmware.se-attestation.json
+seal verify-attestation firmware.se-attestation.json \
+  --device-pub device.pub \
+  --binary ./firmware.bin --sbom sbom.cdx.json
 ```
-
-Hardware keys keep the private key material inside the YubiKey — it never touches the host filesystem.

@@ -50,3 +50,8 @@ deploy/.env
 
 # Claude Code local worktrees (never commit — caused a git submodule error in CI)
 .claude/worktrees/
+
+# cam.video example artifacts (regenerated at runtime — never commit the demo key)
+examples/cam.video/device.key
+examples/cam.video/device.pub
+examples/cam.video/clip.seal/

@@ -22,8 +22,8 @@ RUN cargo build --release
 
 FROM alpine:latest
 RUN apk add --no-cache ca-certificates
-COPY --from=builder /app/target/release/sealedge-core /usr/local/bin/
-ENTRYPOINT ["sealedge-core"]
+COPY --from=builder /app/target/release/sealedge /usr/local/bin/
+ENTRYPOINT ["sealedge"]
 ```
 
 ### CI/CD Pipeline Integration
@@ -40,8 +40,9 @@ jobs:
       - name: Build with Sealedge
         run: |
           cargo build --release
-          ./target/release/sealedge-core \
+          ./target/release/sealedge \
             --input target/release/my-app \
+            --out /dev/null \
             --envelope my-app.seal \
             --key-out deploy.key
 ```
@@ -52,8 +53,9 @@ jobs:
 
 ```bash
 # Large file encryption performance
-time ./target/release/sealedge-core \
+time ./target/release/sealedge \
   --input large_file_1GB.bin \
+  --out /dev/null \
   --envelope large_file.seal \
   --key-out large.key \
   --verbose
@@ -61,7 +63,7 @@ time ./target/release/sealedge-core \
 # Network throughput test
 time ./target/release/sealedge-client \
   --server 192.168.1.100:8080 \
-  --input large_dataset.bin \
+  --file large_dataset.bin \
   --verbose
 ```
 
@@ -69,8 +71,9 @@ time ./target/release/sealedge-client \
 
 ```bash
 # Monitor memory usage during encryption
-/usr/bin/time -v ./target/release/sealedge-core \
+/usr/bin/time -v ./target/release/sealedge \
   --input huge_file.bin \
+  --out /dev/null \
   --envelope huge.seal \
   --key-out huge.key
 ```
@@ -83,9 +86,10 @@ time ./target/release/sealedge-client \
 # Graceful handling of network failures
 ./target/release/sealedge-client \
   --server unstable-server:8080 \
-  --input important.txt \
+  --file important.txt \
   --retry-attempts 3 \
-  --timeout 10000 \
+  --retry-delay 2 \
+  --connect-timeout 10 \
   --verbose 2>&1 | tee connection.log
 ```
 
@@ -93,8 +97,9 @@ time ./target/release/sealedge-client \
 
 ```bash
 # Handle permission errors gracefully
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input /protected/file.txt \
+  --out /dev/null \
   --envelope output.seal \
   --key-out key.hex \
   --verbose 2>&1 || echo "Handle encryption failure"
@@ -105,37 +110,42 @@ time ./target/release/sealedge-client \
 ### Healthcare Data Protection
 
 ```bash
-# HIPAA-compliant patient data encryption
-./target/release/sealedge-core \
+# HIPAA-compliant patient data encryption (keyring-derived key)
+# Requires a build with the keyring feature: cargo build -p sealedge-cli --features keyring
+./target/release/sealedge --set-passphrase "hipaa-vault-passphrase"
+./target/release/sealedge \
   --input patient_records.xml \
+  --out /dev/null \
   --envelope secure_records.seal \
-  --backend yubikey \
-  --slot 9c \
-  --pin-prompt \
-  --audit-log
+  --backend keyring \
+  --use-keyring \
+  --salt-hex $(openssl rand -hex 16)
 ```
 
 ### Financial Data Processing
 
 ```bash
 # PCI DSS compliant transaction processing
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input transactions.csv \
+  --out /dev/null \
   --envelope secure_transactions.seal \
-  --backend software-hsm \
-  --key-derivation pbkdf2 \
-  --iterations 100000
+  --backend hsm \
+  --key-out transactions.key
 ```
 
 ### Legal Evidence Chain
 
 ```bash
 # Tamper-evident legal document storage
+# (device.id is derived from the signing key; use the generic profile's
+#  --source/--description fields to record case context)
 ./target/release/seal wrap \
   --in court_document.pdf \
   --out evidence.seal \
-  --device-id "COURT-SYSTEM-01" \
-  --metadata "case=12345,date=2025-01-15"
+  --device-key court.key \
+  --source "COURT-SYSTEM-01" \
+  --description "case=12345,date=2025-01-15"
 ```
 
 ---

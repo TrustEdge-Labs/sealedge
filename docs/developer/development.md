@@ -97,15 +97,15 @@ sealedge-core/
 │   ├── universal_backend_integration.rs # Backend tests (6)
 │   └── domain_separation_test.rs   # Security tests (7)
 └── examples/            # Comprehensive demonstration examples
-    ├── yubikey_quic_demo.rs       # Phase 3 QUIC integration demo
-    ├── yubikey_certificate_demo.rs # Certificate generation demo
+    ├── verify_yubikey.rs          # YubiKey signature verification demo
+    ├── verify_yubikey_custom_pin.rs # YubiKey verify with a custom PIN
     ├── transport_demo.rs          # Transport abstraction demo
     └── universal_backend_demo.rs  # Backend selection demo
 ```
 
 ### Testing Architecture
 
-**406 Total Tests** across 9 workspace crates covering all system components:
+Tests span 9 workspace crates covering all system components:
 
 **Core Tests (160+):**
 - sealedge-core: envelope encryption, Universal Backend system, receipts, auth, transport
@@ -129,7 +129,7 @@ sealedge-core/
 ./scripts/ci-check.sh            # CI pipeline validation
 
 # Test by crate
-cargo test -p sealedge-core --lib                # Core (160+ tests)
+cargo test -p sealedge-core --lib                # Core library tests
 cargo test -p sealedge-platform --lib            # Platform unit tests
 cargo test -p sealedge-seal-cli --test acceptance # Archive validation (28)
 cargo test -p sealedge-types                     # Types (18)
@@ -283,17 +283,17 @@ cargo fmt
 
 # 4. Test end-to-end scenarios
 # Basic file encryption
-cargo run --release -- --input test.txt --envelope test.seal --key-hex $(openssl rand -hex 32)
-cargo run --release -- --decrypt --input test.seal --out roundtrip.txt
+cargo run -p sealedge-cli --release -- --input test.txt --envelope test.seal --key-hex $(openssl rand -hex 32)
+cargo run -p sealedge-cli --release -- --decrypt --input test.seal --out roundtrip.txt
 
 # Live audio capture (if audio features enabled)
-cargo run --release --features audio -- --audio-capture --duration 5 --envelope voice.seal --key-out key.hex
-cargo run --release --features audio -- --decrypt --input voice.seal --out restored.wav --key-hex $(cat key.hex)
+cargo run -p sealedge-cli --release --features audio -- --live-capture --max-duration 5 --envelope voice.seal --key-out key.hex
+cargo run -p sealedge-cli --release --features audio -- --decrypt --input voice.seal --out restored.wav --key-hex $(cat key.hex)
 
 # Network mode testing
 cargo run --release --bin sealedge-server -- --port 8080 --decrypt &
 SERVER_PID=$!
-cargo run --release --bin sealedge-client -- --server 127.0.0.1:8080 --input test.txt
+cargo run --release --bin sealedge-client -- --server 127.0.0.1:8080 --file test.txt
 kill $SERVER_PID
 
 # 5. Commit and push
@@ -565,7 +565,7 @@ See [threat-model.md](../technical/threat-model.md) for complete threat analysis
    cargo bench
    
    # Memory usage profiling
-   valgrind --tool=massif ./target/release/sealedge-core
+   valgrind --tool=massif ./target/release/sealedge
    ```
 
 ### Continuous Integration

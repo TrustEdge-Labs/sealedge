@@ -27,7 +27,7 @@ v6.0 is a trademark-driven rename from "trustedge" to "sealedge". **There is no 
 | Archive file extension | `.trst` | `.seal` |
 | Attestation file extension | `.te-attestation.json` | `.se-attestation.json` |
 | Env-var prefix | `TRUSTEDGE_*` | `SEALEDGE_*` |
-| Encrypted-key header | `TRUSTEDGE-KEY-V1` | `SEALEDGE-KEY-V1` |
+| Encrypted-key header | `TRUSTEDGE-KEY-V1` | `SEALEDGE-KEY-V2` |
 | Envelope domain | `TRUSTEDGE_ENVELOPE_V1` | `SEALEDGE_ENVELOPE_V1` |
 | Chunk-key domain | `TRUSTEDGE_SEAL_CHUNK_KEY` | `SEALEDGE_SEAL_CHUNK_KEY` |
 | Session-key domain | `TRUSTEDGE_SESSION_KEY_V1` | `SEALEDGE_SESSION_KEY_V1` |
@@ -123,7 +123,7 @@ Any data you want to carry forward must be re-wrapped under v6.0:
 The following errors are all the expected clean-break signal:
 
 - `verify failed: archive magic mismatch — expected SEAL, got TRST`
-- `key file header mismatch — expected SEALEDGE-KEY-V1`
+- `key file header mismatch — expected SEALEDGE-KEY-V2`
 - `AEAD tag verification failed` on an envelope that decrypts under the old domain
 - `handshake failed: peer session-key domain mismatch`
 

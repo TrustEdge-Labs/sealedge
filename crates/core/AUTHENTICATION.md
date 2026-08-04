@@ -7,14 +7,14 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 
 # Sealedge Core Authentication
 
-> **For complete authentication documentation, see [../AUTHENTICATION_GUIDE.md](../AUTHENTICATION_GUIDE.md)**
+> **For complete authentication documentation, see [docs/user/authentication.md](../../docs/user/authentication.md)**
 
-This directory contains the core sealedge authentication implementation. For comprehensive setup guides, security considerations, and production deployment instructions, please refer to the main authentication guide in the project root.
+This directory contains the core sealedge authentication implementation. For comprehensive setup guides, security considerations, and production deployment instructions, please refer to the user authentication guide.
 
 ## Quick Reference
 
-- **Authentication Implementation**: [`src/auth.rs`](src/auth.rs) - Complete Ed25519 mutual authentication system
-- **Certificate Management**: 672-line implementation with automatic generation and validation
+- **Authentication Implementation**: [`src/auth.rs`](src/auth.rs) - Ed25519 mutual authentication system
+- **Certificate Management**: Automatic Ed25519 certificate generation and validation
 - **Session Management**: Cryptographically secure sessions with configurable timeouts
 
 ## Core Features
@@ -28,10 +28,9 @@ This directory contains the core sealedge authentication implementation. For com
 
 | Document | Purpose |
 |----------|---------|
-| **[../AUTHENTICATION_GUIDE.md](../AUTHENTICATION_GUIDE.md)** | **Complete authentication setup and usage guide** |
-| **[../SECURITY.md](../SECURITY.md)** | Security policies and vulnerability reporting |
-| **[../EXAMPLES.md](../EXAMPLES.md)** | Authentication examples and CLI usage |
+| **[docs/user/authentication.md](../../docs/user/authentication.md)** | **Complete authentication setup and usage guide** |
+| **[../../SECURITY.md](../../SECURITY.md)** | Security policies and vulnerability reporting |
 
 ---
 
-**For detailed authentication setup, troubleshooting, and production deployment, see [../AUTHENTICATION_GUIDE.md](../AUTHENTICATION_GUIDE.md).**
+**For detailed authentication setup, troubleshooting, and production deployment, see [docs/user/authentication.md](../../docs/user/authentication.md).**

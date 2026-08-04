@@ -21,6 +21,7 @@ This document provides comprehensive documentation of all dependencies across th
 **Root Workspace Crates:**
 - [sealedge-types](#sealedge-types) - Shared wire types
 - [sealedge-platform](#sealedge-platform) - Consolidated verification and CA service
+- [sealedge-platform-server](#sealedge-platform-server) - Standalone platform HTTP server binary
 - [sealedge-core](#sealedge-core) - Core cryptographic library
 - [sealedge-cli](#sealedge-cli) - Main CLI for envelope encryption
 - [sealedge-seal-protocols](#sealedge-seal-protocols) - Archive format definitions
@@ -67,7 +68,7 @@ Consolidated verification and CA service. Merges sealedge-verify-core and sealed
 | uuid | 1 | Verification and receipt IDs | Used |
 | rand | 0.8 | Key generation for KeyManager | Used |
 | tracing | 0.1 | Structured logging for handlers | Used |
-| jsonwebtoken | 9.2 | JWS receipt signing (EdDSA algorithm) | Used |
+| jsonwebtoken | 10.3 | JWS receipt signing (EdDSA algorithm; aws_lc_rs backend) | Used |
 | regex | 1.0 | Segment hash format validation (^b3:[0-9a-f]{64}$) | Used |
 
 **Crypto deduplication note (v1.5 Phase 26):** `blake3` and `ed25519-dalek` were removed as direct production dependencies in Phase 26. All cryptographic operations now route through `sealedge-core`, which re-exports `ed25519_dalek::{SigningKey, VerifyingKey}` for JWKS key management. blake3 and ed25519-dalek remain transitive dependencies (via sealedge-core) but sealedge-platform has no direct crypto imports.
@@ -116,6 +117,25 @@ Consolidated verification and CA service. Merges sealedge-verify-core and sealed
 
 ---
 
+## sealedge-platform-server
+
+Standalone HTTP server binary that boots the platform verification service (Axum + clap CLI).
+
+| Dependency | Version | Justification | Status |
+|------------|---------|---------------|--------|
+| sealedge-platform | path | Platform service (built with `http` + `openapi` features) | Used |
+| sealedge-core | path | Core crypto types re-exported to the binary | Used |
+| anyhow | 1.0 | Error propagation in `main` | Used |
+| axum | 0.7 | HTTP server runtime | Used |
+| clap | 4.5 | CLI argument parsing | Used |
+| tokio | 1.0 | Async runtime | Used |
+| tracing | 0.1 | Structured logging | Used |
+| tracing-subscriber | 0.3 | Log formatting and env-filter | Used |
+
+**Features:** `postgres` and `ca` forward to the corresponding `sealedge-platform` features.
+
+---
+
 ## sealedge-core
 
 Core cryptographic library with network transport, backends, and protocol implementations.
@@ -129,6 +149,9 @@ Core cryptographic library with network transport, backends, and protocol implem
 | bincode | 1.3 | Binary serialization for vector storage and inspection tools | Used |
 | blake3 | 1.5 | Cryptographic hashing for continuity chains and manifests | Used |
 | chacha20poly1305 | 0.10 | XChaCha20-Poly1305 encryption for crypto.rs module | Used |
+| hpke | 0.12 | HPKE (RFC 9180) wrapping of the per-archive content-encryption key to recipients (C4) | Used |
+| x25519-dalek | 2 | X25519 key-agreement keys and ECDH for envelope/archive key agreement (C4) | Used |
+| hkdf | 0.12 | HKDF-SHA256 key derivation for envelope keys and nonce prefixes (C4) | Used |
 | chrono | 0.4 | Timestamp formatting for binaries (server, demos) | Used |
 | clap | 4.5 | CLI argument parsing for server, client, and demo binaries | Used |
 | cpal | 0.15 | Live audio capture (feature-gated: audio) | Used (optional) |
@@ -231,6 +254,7 @@ CLI tool for .seal archive wrap/verify operations.
 | rand | 0.8 | Random number generation | Used |
 | rand_chacha | 0.3 | ChaCha RNG for deterministic randomness | Used |
 | reqwest | 0.11 | HTTP client for --post option (POSTs verify requests) | Used |
+| rpassword | 7 | Passphrase prompt for encrypted key bundles (keygen/wrap/unwrap) | Used |
 | tokio | 1.0 | Async runtime for reqwest | Used |
 | blake3 | 1.5 | Hashing for chunk verification | Used |
 
@@ -240,7 +264,7 @@ CLI tool for .seal archive wrap/verify operations.
 
 **Configuration:** Trimmed from `["full"]` to minimal feature set: `["macros", "rt-multi-thread"]`
 
-**reqwest justification:** The `seal sign` command has a `--post` option that POSTs the generated verify request to a remote URL. This is a legitimate feature for integration with verification services. The dependency is kept and justified.
+**reqwest justification:** The `seal emit-request` command has a `--post` option that POSTs the generated verify request to a remote URL. This is a legitimate feature for integration with verification services. The dependency is kept and justified.
 
 ---
 
@@ -339,6 +363,9 @@ The workspace defines shared dependencies in `[workspace.dependencies]` to minim
 - rand 0.8
 - rand_core 0.6
 - rsa 0.9.10 (with pem feature)
+- hpke 0.12 (alloc, x25519 features)
+- x25519-dalek 2 (static_secrets feature)
+- hkdf 0.12
 
 **Serialization:**
 - bincode 1.3

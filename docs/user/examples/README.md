@@ -58,8 +58,8 @@ Real-world examples and use cases for Sealedge privacy-preserving edge computing
 
 ### **Network & Distributed Systems**
 - [Secure Client-Server Setup](network.md#network-mode-quick-start)
-- [Mutual TLS Authentication](network.md#mutual-tls-authentication)
-- [Connection Resilience](network.md#automatic-retry-with-exponential-backoff)
+- [Mutual Authentication](network.md#mutual-authentication)
+- [Connection Resilience](network.md#automatic-retry-with-backoff)
 
 ## 🛠️ By Technical Level
 
@@ -74,14 +74,14 @@ Real-world examples and use cases for Sealedge privacy-preserving edge computing
 3. [Audio Capture](audio.md#live-audio-capture) - Media processing
 
 ### **Advanced** (Developers & Admins)
-1. [YubiKey Hardware Integration](backends.md#yubikey-pkcs11-operations) - Hardware security
+1. [YubiKey Hardware Integration](backends.md#yubikey-examples-library-based) - Hardware security
 2. [Software Attestation](attestation.md#basic-attestation-workflow) - Supply chain security
 3. [CI/CD Integration](integration.md#cicd-pipeline-integration) - Production workflows
 
 ## 📋 Reference Information
 
 ### **Command Reference**
-- **Core encryption**: `sealedge-core --help`
+- **Core encryption**: `sealedge --help`
 - **Network server**: `sealedge-server --help`
 - **Network client**: `sealedge-client --help`
 - **Archive tool**: `seal --help`

@@ -118,12 +118,50 @@ let result = backend.perform_operation("9a", CryptoOperation::Sign {
 })?;
 ```
 
-**Binary Requirement**: The `yubikey-demo` binary is gated behind this feature:
+**Example Programs**: YubiKey verification examples are gated behind this feature:
 ```bash
-cargo run -p sealedge-core --features yubikey --bin yubikey-demo
+cargo run -p sealedge-core --example verify_yubikey --features yubikey
+cargo run -p sealedge-core --example verify_yubikey_custom_pin --features yubikey
 ```
 
 **CI Note**: This feature is tested in CI but skips actual hardware operations.
+
+---
+
+#### 3. `git-attestation` - Git Repository State Attestation
+**Purpose**: Attest the state of a Git repository (commit, dirty flag, remotes).
+
+**Dependencies Added**:
+- `git2` (0.18) - libgit2 bindings
+
+**Build Command**:
+```bash
+cargo build -p sealedge-core --features git-attestation
+```
+
+---
+
+#### 4. `keyring` - OS Keyring Integration
+**Purpose**: Store and retrieve key material via the OS keyring backend.
+
+**Dependencies Added**:
+- `keyring` (2.0) - Cross-platform keyring access (macOS Keychain, Windows Credential Manager, Linux Secret Service)
+
+**Build Command**:
+```bash
+cargo build -p sealedge-core --features keyring
+```
+
+**Note**: `keyring` is NOT enabled by default.
+
+---
+
+#### 5. `insecure-tls` - Skip TLS Certificate Verification (Development Only)
+**Purpose**: Skip TLS certificate verification in the QUIC transport for local development.
+
+**Dependencies Added**: none
+
+**Warning**: Development only. Never enable in production.
 
 ---
 
@@ -133,7 +171,7 @@ cargo run -p sealedge-core --features yubikey --bin yubikey-demo
 ```bash
 cargo build -p sealedge-core --all-features
 # Equivalent to:
-cargo build -p sealedge-core --features audio,yubikey
+cargo build -p sealedge-core --features audio,yubikey,git-attestation,keyring,insecure-tls
 ```
 
 #### Test Everything
@@ -199,7 +237,8 @@ wasm-pack build crates/seal-wasm --target web --out-dir ../../web/demo/pkg
 ```
 
 **What It Provides**:
-- `verify_archive()` - Browser-side .seal verification
+- `verify_manifest(manifest_bytes, device_pub)` - Manifest-only verification
+- `verify_archive(dir_handle, device_pub)` - Full browser-side .seal verification (async)
 - Ed25519 signature validation
 - BLAKE3 continuity chain checking
 - Chunk hash verification
@@ -286,9 +325,9 @@ wasm-pack build crates/seal-wasm --target web --release
 **Symptom**: `AudioCapture` type not found
 **Solution**: Add `--features audio` to your build command
 
-### 2. YubiKey Binary Not Available
-**Symptom**: `no bin target named yubikey-demo`
-**Solution**: Add `--features yubikey` to enable the gated binary
+### 2. YubiKey Example Not Available
+**Symptom**: `no example target named verify_yubikey`
+**Solution**: Add `--features yubikey` to enable the gated examples (`verify_yubikey`, `verify_yubikey_custom_pin`)
 
 ### 3. WASM Build Failures
 **Symptom**: `wasm-pack not found`
@@ -304,7 +343,7 @@ wasm-pack build crates/seal-wasm --target web --release
 
 - **Universal Backend System**: See `docs/technical/universal-backend.md`
 - **WASM Testing**: See `docs/developer/wasm-testing.md`
-- **YubiKey Integration**: See examples in `crates/core/examples/yubikey_demo.rs`
+- **YubiKey Integration**: See examples in `crates/core/examples/verify_yubikey.rs` and `crates/core/examples/verify_yubikey_custom_pin.rs`
 - **Audio Capture**: See examples in `crates/core/src/audio.rs` tests
 
 ---

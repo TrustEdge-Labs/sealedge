@@ -69,15 +69,15 @@ cargo build --workspace --release --features audio,yubikey
 **Verification:**
 ```bash
 # Verify installation
-./target/release/sealedge-core --version
+./target/release/sealedge --version
 ./target/release/sealedge-server --version
 ./target/release/sealedge-client --version
 ./target/release/seal --version
 
-# Test basic functionality
+# Test basic functionality (encrypt mode requires --out; /dev/null discards the round-trip copy)
 echo "Hello Sealedge!" > test.txt
-./target/release/sealedge-core --input test.txt --envelope test.seal --key-out test.key
-./target/release/sealedge-core --decrypt --input test.seal --out recovered.txt --key-hex $(cat test.key)
+./target/release/sealedge --input test.txt --out /dev/null --envelope test.seal --key-out test.key
+./target/release/sealedge --decrypt --input test.seal --out recovered.txt --key-hex $(cat test.key)
 diff test.txt recovered.txt  # Should show no differences
 ```
 

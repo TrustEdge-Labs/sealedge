@@ -10,220 +10,39 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 
 > **EXPERIMENTAL** -- This crate is Tier 2 (experimental). General WASM bindings for sealedge. No maintenance commitment. For browser archive verification, use `sealedge-seal-wasm` (Tier 1) instead.
 
-WebAssembly bindings for sealedge cryptographic operations, providing high-performance encryption and decryption in web browsers and Node.js environments.
+WebAssembly bindings for general sealedge cryptographic helpers (AES-256-GCM
+encrypt/decrypt and small utilities) for use in browsers and Node.js.
 
-> **Complete WASM Guide**: See **[WASM.md](../../WASM.md)** for comprehensive build, test, and deployment documentation.
+This crate is **not published to npm or crates.io**; build it from source with
+`wasm-pack`.
 
-## Features
+> **Complete WASM guide**: see **[WASM.md](../../WASM.md)** for build, test, and deployment documentation.
 
-- **AES-256-GCM Encryption**: Industry-standard authenticated encryption
-- **WebAssembly Performance**: Near-native speed cryptographic operations
-- **Browser Compatible**: Works in all modern web browsers
-- **TypeScript Support**: Full type definitions included
-- **Easy Integration**: Simple JavaScript API
-- **Secure Random Generation**: Cryptographically secure random number generation
-- **Zero Dependencies**: Self-contained WASM module
+## Exported API
 
-## Installation
+The crate exports free functions and two small classes via `wasm-bindgen` (names
+are preserved from Rust). The current surface includes:
 
-### NPM Package (Coming Soon)
+- `generate_key()` / `generate_nonce()` — generate a base64 key / nonce
+- `encrypt_simple(data, key)` — encrypt with an auto-generated nonce, returns `EncryptedData`
+- `encrypt(data, key, nonce)` — encrypt with an explicit nonce
+- `decrypt(encrypted_data, key)` — decrypt an `EncryptedData`
+- `validate_key(key)` / `validate_nonce(nonce)` — format checks
+- `generate_random_bytes(length)` — base64 random bytes
+- `EncryptedData` — `{ ciphertext, nonce, key_id }` with `to_json` / `from_json`
+- `Timer` — `elapsed()` / `log_elapsed(operation)` for coarse timing
 
-```bash
-npm install @sealedge/wasm
-```
-
-### Direct Usage
-
-1. Build the WASM module:
-```bash
-wasm-pack build --target web --out-dir pkg
-```
-
-2. Include in your HTML:
-```html
-<script type="module">
-import Sealedge from './js/sealedge.js';
-
-const sealedge = new Sealedge();
-await sealedge.init();
-
-// Ready to use!
-</script>
-```
-
-## Quick Start
-
-### Basic Encryption/Decryption
-
-```javascript
-import Sealedge from '@sealedge/wasm';
-
-// Initialize
-const sealedge = new Sealedge();
-await sealedge.init();
-
-// Generate a key
-const key = sealedge.generateKey();
-
-// Encrypt data
-const encrypted = sealedge.encryptSimple("Hello, World!", key);
-console.log('Encrypted:', encrypted);
-
-// Decrypt data
-const decrypted = sealedge.decrypt(encrypted, key);
-console.log('Decrypted:', decrypted); // "Hello, World!"
-```
-
-### Advanced Usage
-
-```javascript
-// Generate custom nonce
-const nonce = sealedge.generateNonce();
-
-// Encrypt with custom nonce
-const encrypted = sealedge.encrypt("Secret data", key, nonce);
-
-// Validate key format
-if (sealedge.validateKey(key)) {
-    console.log('Key is valid');
-}
-
-// Generate random bytes
-const randomBytes = sealedge.generateRandomBytes(32);
-
-// Performance timing
-const timer = sealedge.createTimer();
-// ... perform operations ...
-console.log('Operation took:', timer.elapsed(), 'ms');
-```
-
-## API Reference
-
-### Sealedge Class
-
-#### Constructor
-```typescript
-const sealedge = new Sealedge();
-```
-
-#### Methods
-
-##### `init(): Promise<Sealedge>`
-Initialize the WASM module. Must be called before using any cryptographic functions.
-
-##### `generateKey(): string`
-Generate a new 256-bit encryption key (base64-encoded).
-
-##### `generateNonce(): string`
-Generate a new 96-bit nonce for encryption (base64-encoded).
-
-##### `encryptSimple(data: string, key: string): EncryptedData`
-Encrypt data with auto-generated nonce.
-
-##### `encrypt(data: string, key: string, nonce?: string): EncryptedData`
-Encrypt data with optional custom nonce.
-
-##### `decrypt(encryptedData: EncryptedData, key: string): string`
-Decrypt encrypted data.
-
-##### `validateKey(key: string): boolean`
-Validate a base64-encoded key format.
-
-##### `validateNonce(nonce: string): boolean`
-Validate a base64-encoded nonce format.
-
-##### `generateRandomBytes(length: number): string`
-Generate secure random bytes (base64-encoded).
-
-##### `createTimer(): Timer`
-Create a performance timer.
-
-### EncryptedData Class
-
-```typescript
-class EncryptedData {
-    readonly ciphertext: string;
-    readonly nonce: string;
-    readonly key_id: string | null;
-    
-    to_json(): string;
-    static from_json(json: string): EncryptedData;
-}
-```
-
-### Timer Class
-
-```typescript
-class Timer {
-    elapsed(): number;
-    log_elapsed(operation: string): void;
-}
-```
-
-## Examples
-
-### Web Browser Example
-
-See `examples/basic-usage.html` for a complete interactive example.
-
-### Node.js Example
-
-```javascript
-import Sealedge from '@sealedge/wasm';
-
-async function example() {
-    const sealedge = new Sealedge();
-    await sealedge.init();
-    
-    const key = sealedge.generateKey();
-    const data = "Sensitive information";
-    
-    const encrypted = sealedge.encryptSimple(data, key);
-    const decrypted = sealedge.decrypt(encrypted, key);
-    
-    console.log('Original:', data);
-    console.log('Decrypted:', decrypted);
-    console.log('Match:', data === decrypted);
-}
-
-example().catch(console.error);
-```
-
-## Performance
-
-Sealedge WASM provides excellent performance for cryptographic operations:
-
-- **Encryption**: ~0.1-0.5ms per operation (1KB data)
-- **Decryption**: ~0.1-0.5ms per operation (1KB data)
-- **Throughput**: 50-200 MB/s (depending on browser and hardware)
-
-Performance may vary based on:
-- Browser engine (V8, SpiderMonkey, etc.)
-- Hardware capabilities
-- Data size
-- System load
-
-## Security
-
-- **AES-256-GCM**: Authenticated encryption with 256-bit keys
-- **Secure Random**: Uses cryptographically secure random number generation
-- **Memory Safety**: Rust's memory safety guarantees
-- **Side-Channel Resistance**: Constant-time operations where possible
-
-## Browser Compatibility
-
-- Chrome/Chromium 57+
-- Firefox 52+
-- Safari 11+
-- Edge 16+
+> The exact signatures are the source of truth; consult
+> [`src/lib.rs`](src/lib.rs), [`src/crypto.rs`](src/crypto.rs), and
+> [`src/utils.rs`](src/utils.rs) before relying on any function here.
 
 ## Building from Source
 
 ### Prerequisites
 
-- Rust 1.89+
-- wasm-pack
-- Node.js 16+ (for testing)
+- Rust toolchain
+- `wasm-pack`
+- Node.js (for testing)
 
 ### Build Steps
 
@@ -244,34 +63,17 @@ wasm-pack build --target nodejs --out-dir pkg-node
 wasm-pack build --target bundler --out-dir pkg-bundler
 ```
 
-### Testing
+## Security
 
-```bash
-# Start test server
-python3 -m http.server 8080
-
-# Open browser to http://localhost:8080/test.html
-```
+- **AES-256-GCM**: authenticated encryption with 256-bit keys
+- **Secure random**: cryptographically secure random number generation
+- **Memory safety**: Rust's memory-safety guarantees
 
 ## License
 
-This project is licensed under the Mozilla Public License 2.0 (MPL-2.0).
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines.
+Licensed under the Mozilla Public License 2.0 (MPL-2.0).
 
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/TrustEdge-Labs/sealedge/issues)
-- **Documentation**: [Sealedge Docs](https://github.com/TrustEdge-Labs/sealedge#readme)
 - **Enterprise**: [enterprise@trustedgelabs.com](mailto:enterprise@trustedgelabs.com)
-
-## Changelog
-
-### v0.1.0
-- Initial release
-- AES-256-GCM encryption/decryption
-- WebAssembly bindings
-- JavaScript/TypeScript SDK
-- Browser and Node.js support

@@ -64,8 +64,11 @@ The simplest working example to test:
 ```bash
 cd /path/to/sealedge
 
-# Run the basic YubiKey demo
-cargo run --example yubikey_demo --features yubikey
+# Run the basic YubiKey verification example
+cargo run -p sealedge-core --example verify_yubikey --features yubikey
+
+# Or run the variant that prompts for a custom PIN
+cargo run -p sealedge-core --example verify_yubikey_custom_pin --features yubikey
 ```
 
 **What it does**:
@@ -185,7 +188,7 @@ ykman piv certificates generate 9c /tmp/test_pubkey.pem --subject "CN=Test"
 
 **Solution**: The examples are **library code**, not CLI commands. Run them with:
 ```bash
-cargo run --example yubikey_demo --features yubikey
+cargo run -p sealedge-core --example verify_yubikey --features yubikey
 ```
 
 NOT as a CLI with arguments like `--list-slots`.
@@ -198,7 +201,7 @@ Run this one-liner to test everything:
 cd /path/to/sealedge && \
   ykman piv info && \
   echo "---" && \
-  cargo run --example yubikey_demo --features yubikey 2>&1 | head -50
+  cargo run -p sealedge-core --example verify_yubikey --features yubikey 2>&1 | head -50
 ```
 
 This will:
@@ -210,8 +213,8 @@ This will:
 
 ✅ **YubiKey working correctly if you see:**
 ```
-● Sealedge YubiKey Integration Demo
-===================================
+● Sealedge YubiKey Verification Test
+====================================
 ...
 ✔ YubiKey backend initialized successfully
 
@@ -224,9 +227,10 @@ Scanning PIV Slots for Keys:
 ## Next Steps
 
 Once basic detection works:
-1. Try `yubikey_certificate_demo` - Hardware certificate generation
-2. Try `yubikey_hardware_signing_demo` - Real hardware signing
-3. Try `yubikey_quic_hardware_demo` - QUIC with YubiKey certs
+1. Try `verify_yubikey_custom_pin` - Same flow with a custom PIN prompt:
+   `cargo run -p sealedge-core --example verify_yubikey_custom_pin --features yubikey`
+2. Sign a `.seal` archive with hardware-backed signing:
+   `cargo run -p sealedge-seal-cli --features yubikey -- wrap --backend yubikey --sign-only --in data.bin --out archive.seal --device-key device.key`
 
 ## Need Help?
 

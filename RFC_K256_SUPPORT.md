@@ -1,11 +1,11 @@
 <!--
 Copyright (c) 2025 TRUSTEDGE LABS LLC
 MPL-2.0: https://mozilla.org/MPL/2.0/
-Project: trustedge — Privacy and trust at the edge.
-GitHub: https://github.com/TrustEdge-Labs/trustedge
+Project: sealedge — Privacy and trust at the edge.
+GitHub: https://github.com/TrustEdge-Labs/sealedge
 -->
 
-# Adding secp256k1 (K1) Support to TrustEdge
+# Adding secp256k1 (K1) Support to Sealedge
 
 **Status**: Planning Phase  
 **Priority**: P1  
@@ -13,7 +13,7 @@ GitHub: https://github.com/TrustEdge-Labs/trustedge
 
 ## 📋 Overview
 
-This document outlines the plan to add **secp256k1 (K1 curve)** support alongside the existing **secp256r1 (P-256/R1 curve)** support. This will enable TrustEdge to interoperate with Bitcoin, Ethereum, and other blockchain ecosystems while maintaining compatibility with standard NIST curves.
+This document outlines the plan to add **secp256k1 (K1 curve)** support alongside the existing **secp256r1 (P-256/R1 curve)** support. This will enable Sealedge to interoperate with Bitcoin, Ethereum, and other blockchain ecosystems while maintaining compatibility with standard NIST curves.
 
 **Why Both Curves**:
 - **secp256r1 (P-256/R1)**: NIST standard, used by YubiKey, TPM, government systems
@@ -316,7 +316,7 @@ fn test_k256_sign_verify() {
 **File**: `crates/core/tests/k256_integration.rs` (NEW)
 
 ```rust
-use trustedge_core::backends::{
+use sealedge_core::backends::{
     SoftwareHsmBackend, UniversalBackend, CryptoOperation, 
     SignatureAlgorithm, AsymmetricAlgorithm
 };
@@ -357,7 +357,7 @@ fn test_software_hsm_k256_operations() {
 //!
 //! Demonstrates secp256k1 signing compatible with Ethereum
 
-use trustedge_core::backends::*;
+use sealedge_core::backends::*;
 
 fn main() -> anyhow::Result<()> {
     let backend = SoftwareHsmBackend::new()?;
@@ -429,7 +429,7 @@ Add section on curve selection:
 
 **Build Command**:
 ```bash
-cargo build -p trustedge-core --features k256
+cargo build -p sealedge-core --features k256
 ```
 
 **Note**: YubiKey hardware only supports P-256, not K1.
@@ -509,4 +509,4 @@ sha3 = "0.10"  # For Ethereum address derivation
 
 ---
 
-For questions, contact the TrustEdge team or open a GitHub issue.
+For questions, contact the Sealedge team or open a GitHub issue.

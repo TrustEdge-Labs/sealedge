@@ -26,73 +26,75 @@ Secure client-server communication with mutual authentication and resilient conn
 # Connect client with authentication
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input file.txt \
-  --require-auth \
+  --file file.txt \
+  --enable-auth \
   --verbose
 ```
 
 ## Connection Resilience & Error Recovery
 
-### Automatic Retry with Exponential Backoff
+### Automatic Retry with Backoff
 
 ```bash
-# Client with retry configuration
+# Client with retry configuration (timeouts and delays are in SECONDS)
 ./target/release/sealedge-client \
   --server 192.168.1.100:8080 \
-  --input large_file.bin \
+  --file large_file.bin \
   --retry-attempts 5 \
-  --retry-delay 1000 \
-  --timeout 30000 \
+  --retry-delay 2 \
+  --connect-timeout 30 \
   --verbose
 ```
 
-### Network Interruption Handling
+### Connection Limits and Timeouts
 
 ```bash
-# Server with connection timeout handling
+# Server with per-connection limits and read timeout (SECONDS)
 ./target/release/sealedge-server \
   --listen 0.0.0.0:8080 \
-  --connection-timeout 60000 \
-  --max-connections 10 \
+  --connection-timeout 60 \
+  --max-connection-bytes 1073741824 \
+  --max-connection-chunks 10000 \
   --verbose \
   --decrypt
 ```
 
 ## Secure Authentication Examples
 
-### Mutual TLS Authentication
+Sealedge network authentication is **Ed25519 mutual authentication** with an
+**X25519 ECDH** handshake that derives the session encryption key. It is not
+OpenSSL PEM mutual TLS — there are no `--cert`/`--key`/`--ca-cert` flags. Both
+sides generate self-signed identity certificates automatically on first run.
+See the [Authentication Guide](../authentication.md) for the full protocol.
+
+### Mutual Authentication
 
 ```bash
-# Generate server certificate
-openssl req -x509 -newkey rsa:4096 -keyout server_key.pem -out server_cert.pem -days 365 -nodes
-
-# Start server with certificate
+# Server: require mutual authentication (generates ./sealedge-server.key/.cert)
 ./target/release/sealedge-server \
   --listen 0.0.0.0:8443 \
-  --cert server_cert.pem \
-  --key server_key.pem \
-  --require-client-cert \
+  --require-auth \
+  --server-identity "Production Server" \
   --decrypt
-```
 
-### Certificate-Based Client Authentication
-
-```bash
-# Generate client certificate
-openssl req -x509 -newkey rsa:4096 -keyout client_key.pem -out client_cert.pem -days 365 -nodes
-
-# Connect with client certificate
+# Client: enable authentication and pin the server's certificate
 ./target/release/sealedge-client \
   --server secure-server.example.com:8443 \
-  --cert client_cert.pem \
-  --key client_key.pem \
-  --ca-cert server_cert.pem \
-  --input sensitive_data.txt
+  --file sensitive_data.txt \
+  --enable-auth \
+  --client-identity "Mobile App v2.1" \
+  --server-cert sealedge-server.cert
 ```
+
+When authentication is enabled the session key is derived via ECDH, so no
+`--key-hex` or shared secret is needed for the encrypted transfer.
 
 ## Legacy Network Examples (No Authentication)
 
 ### Basic Server-Client Communication
+
+Without authentication there is no key exchange, so both sides must share the
+same AES-256 key via `--key-hex`.
 
 ```bash
 # Simple server (no authentication)
@@ -104,7 +106,7 @@ openssl req -x509 -newkey rsa:4096 -keyout client_key.pem -out client_cert.pem -
 # Simple client (no authentication)
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input document.txt \
+  --file document.txt \
   --key-hex "a1b2c3d4e5f6789a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4"
 ```
 

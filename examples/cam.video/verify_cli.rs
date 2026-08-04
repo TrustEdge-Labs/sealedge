@@ -13,7 +13,7 @@ use std::fs;
 use sealedge_core::{read_archive, validate_archive, verify_manifest, ProfileMetadata};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Sealedge P0 cam.video Example: Verify CLI");
+    println!("Sealedge cam.video Example: Verify CLI");
 
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
@@ -29,21 +29,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Archive: {}", archive_path);
     println!("Device key: {}", key_path);
 
-    // Read device public key
-    let device_pub = fs::read_to_string(&key_path).map_err(|e| {
+    // Read device public key. A SEALEDGE-KEY-V2 `.pub` carries two lines
+    // (ed25519 + x25519); archive signatures are Ed25519, so select that line.
+    let device_pub_content = fs::read_to_string(&key_path).map_err(|e| {
         format!(
             "Failed to read device public key from '{}': {}",
             key_path, e
         )
     })?;
-    let device_pub = device_pub.trim();
-
-    // Ensure device public key has proper format
-    let device_pub_key = if device_pub.starts_with("ed25519:") {
-        device_pub.to_string()
-    } else {
-        format!("ed25519:{}", device_pub)
-    };
+    let device_pub_key = device_pub_content
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| l.starts_with("ed25519:"))
+        .map(|l| l.to_string())
+        .unwrap_or_else(|| {
+            let trimmed = device_pub_content.trim();
+            if trimmed.starts_with("ed25519:") {
+                trimmed.to_string()
+            } else {
+                format!("ed25519:{}", trimmed)
+            }
+        });
 
     println!("Device public key: {}", device_pub_key);
     println!();
@@ -51,6 +57,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Read and validate archive
     let (manifest, _chunks) = read_archive(&archive_path)
         .map_err(|e| format!("Failed to read archive '{}': {}", archive_path, e))?;
+
+    // Version dispatch (C4): reject legacy/unknown formats before the signature
+    // check — canonical bytes differ across versions.
+    if manifest.trst_version != "0.2.0" {
+        return Err(format!(
+            "unsupported archive version {} (expected 0.2.0)",
+            manifest.trst_version
+        )
+        .into());
+    }
 
     // Get signature and canonical bytes
     let signature = manifest

@@ -113,13 +113,13 @@ seal verify-attestation <attestation-path> --device-pub <pub-key>
 **Example:**
 
 ```bash
-# Signature verification only
+# Signature verification only (pass the .pub file path, or an inline ed25519: key)
 seal verify-attestation attestation.se-attestation.json \
-  --device-pub "$(cat build.pub)"
+  --device-pub build.pub
 
 # Signature + file hash verification
 seal verify-attestation attestation.se-attestation.json \
-  --device-pub "$(cat build.pub)" \
+  --device-pub build.pub \
   --binary target/release/myapp --sbom bom.cdx.json
 ```
 
@@ -131,7 +131,10 @@ The `seal` command provides secure archival capabilities with Ed25519 digital si
 
 ### seal keygen - Generate Key Pair
 
-Generate a device Ed25519 signing key pair for archive signing.
+Generate a device key **bundle** (`SEALEDGE-KEY-V2`): an Ed25519 signing key plus
+an independent X25519 key-agreement key, used for signing and content encryption
+respectively. The `.pub` file carries both public keys, one per line
+(`ed25519:...` then `x25519:...`).
 
 ```bash
 seal keygen --out-key <KEY_PATH> --out-pub <PUB_PATH> [--unencrypted]
@@ -139,9 +142,9 @@ seal keygen --out-key <KEY_PATH> --out-pub <PUB_PATH> [--unencrypted]
 
 | Option | Description |
 |--------|-------------|
-| `--out-key <PATH>` | Output path for the private key file |
-| `--out-pub <PATH>` | Output path for the public key file |
-| `--unencrypted` | Generate plaintext key (no passphrase). CI/automation only — see [Encrypted Key Files](#encrypted-key-files) |
+| `--out-key <PATH>` | Output path for the private key bundle |
+| `--out-pub <PATH>` | Output path for the public key file (two lines: ed25519 + x25519) |
+| `--unencrypted` | Generate plaintext key bundle (no passphrase). CI/automation only — see [Encrypted Key Files](#encrypted-key-files) |
 
 ```bash
 # Generate encrypted key (passphrase prompted)
@@ -153,7 +156,14 @@ seal keygen --out-key device.key --out-pub device.pub --unencrypted
 
 ### seal wrap - Create Archives
 
-Create a signed .seal archive from input data.
+Create a signed .seal archive from input data. Archives are **encrypted by
+default** (per-archive random content key, XChaCha20-Poly1305, HPKE-wrapped to
+recipients). The default profile is `generic`. If `--device-key` is omitted,
+`wrap` auto-generates `device.key` + `device.pub`.
+
+The device `id` is derived from the signing public key; `model`, `firmware`, and
+the cam.video `resolution`/`codec` are fixed defaults in the manifest — there are
+no flags to set them, and there is no archive-chaining flag.
 
 ```bash
 seal wrap --in <INPUT> --out <OUTPUT> [OPTIONS]
@@ -163,71 +173,77 @@ seal wrap --in <INPUT> --out <OUTPUT> [OPTIONS]
 
 | Option | Description | Example |
 |--------|-------------|---------|
-| `--in <PATH>` | Input file or data stream | `--in video.bin` |
-| `--out <PATH>` | Output .seal archive directory | `--out recording.seal` |
+| `--in <PATH>` | Input file | `--in video.bin` |
+| `--out <PATH>` | Output .seal archive directory (must end in `.seal`) | `--out recording.seal` |
 
-#### Archive Options
-
-| Option | Default | Description | Example |
-|--------|---------|-------------|---------|
-| `--profile <PROFILE>` | `generic` | Archive profile type: `generic`, `cam.video`, `sensor`, `audio`, `log` | `--profile cam.video` |
-| `--chunk-size <SIZE>` | `1048576` | Chunk size in bytes (1MB) | `--chunk-size 4096` |
-| `--chunk-seconds <SECONDS>` | `2` | Time duration per chunk | `--chunk-seconds 1.5` |
-
-#### Device Configuration
+#### Common Options
 
 | Option | Default | Description | Example |
 |--------|---------|-------------|---------|
-| `--device-key <PATH>` | (generated) | Existing device signing key | `--device-key device.key` |
-| `--device-id <ID>` | (generated) | Device identifier | `--device-id "CAM001"` |
-| `--device-model <MODEL>` | `TrustEdgeRefCam` | Device model name | `--device-model "SecurityCam Pro"` |
-| `--device-fw <VERSION>` | `1.0.0` | Device firmware version | `--device-fw "2.1.3"` |
+| `--profile <PROFILE>` | `generic` | Profile: `generic`, `cam.video`, `sensor`, `audio`, `log` | `--profile cam.video` |
+| `--device-key <PATH>` | (generated) | Existing device key bundle; auto-generates if omitted | `--device-key device.key` |
+| `--chunk-size <SIZE>` | `1048576` | Chunk size in bytes (1MB; max 256MB) | `--chunk-size 4096` |
+| `--recipient <X25519_PUB>` | - | Additional HPKE recipient (`x25519:<base64>`); repeatable | `--recipient "x25519:..."` |
+| `--sign-only` | - | Plaintext chunks, no encryption (cannot combine with `--recipient`) | `--sign-only` |
+| `--unencrypted` | - | Read a plaintext key bundle without a passphrase prompt (CI only) | `--unencrypted` |
+| `--backend <BACKEND>` | `software` | Signing backend: `software` or `yubikey` (yubikey requires `--sign-only`) | `--backend yubikey` |
+| `--slot <SLOT>` | `9c` | YubiKey PIV slot (yubikey backend) | `--slot 9c` |
+| `--seed <U64>` | - | Seed the RNG for deterministic output (testing/CI; not secure) | `--seed 42` |
 
-#### Capture Metadata
+#### Profile-specific flags
 
-| Option | Default | Description | Example |
-|--------|---------|-------------|---------|
-| `--fps <FPS>` | `30` | Frames per second | `--fps 60` |
-| `--resolution <RES>` | `1920x1080` | Video resolution | `--resolution 4096x2160` |
-| `--codec <CODEC>` | `raw` | Video codec | `--codec h264` |
-| `--started-at <TIME>` | (current) | Capture start time (RFC3339) | `--started-at 2025-01-15T10:30:00Z` |
-| `--tz <TIMEZONE>` | `UTC` | Timezone | `--tz "America/New_York"` |
-
-#### Continuity Options
-
-| Option | Description | Example |
-|--------|-------------|---------|
-| `--prev-archive-hash <HASH>` | Link to previous archive for chain continuity | `--prev-archive-hash "abc123..."` |
+| Profile | Flags |
+|---------|-------|
+| `cam.video` | `--fps` (default 30), `--chunk-seconds` (default 2.0) |
+| `sensor` | `--sample-rate`, `--unit`, `--sensor-model` (required); `--latitude`, `--longitude`, `--altitude` (optional) |
+| `audio` | `--sample-rate`, `--bit-depth`, `--channels`, `--codec` (all required) |
+| `log` | `--application`, `--host`, `--log-level`, `--log-format` (all required) |
+| `generic` | `--data-type`, `--source`, `--description`, `--mime-type` (all optional) |
 
 #### Example Usage
 
 ```bash
-# Basic archive creation
-seal wrap --in recording.bin --out recording.seal
+# Basic archive (generic profile; auto-generates device.key + device.pub; encrypted)
+seal wrap --in recording.bin --out recording.seal --device-key device.key
 
-# High-quality security camera archive
+# Security camera archive
 seal wrap \
   --in security_feed.bin \
   --out evidence.seal \
   --profile cam.video \
   --fps 60 \
-  --resolution 3840x2160 \
-  --device-model "SecureCam X1" \
-  --device-id "CAM-LOBBY-01"
+  --chunk-seconds 2.0 \
+  --device-key device.key
 
-# Continuous recording with linking
+# Also readable by an auditor (extra HPKE recipient)
 seal wrap \
-  --in segment_002.bin \
-  --out segment_002.seal \
-  --prev-archive-hash "$(cat segment_001.hash)"
+  --in recording.bin \
+  --out recording.seal \
+  --device-key device.key \
+  --recipient "x25519:<auditor-pub>"
+
+# Signed-but-unencrypted archive (plaintext chunks)
+seal wrap --sign-only --in recording.bin --out recording.seal --device-key device.key
+
+# Sensor archive with geo metadata
+seal wrap \
+  --in data.csv \
+  --out sensor.seal \
+  --profile sensor \
+  --sample-rate 100 \
+  --unit celsius \
+  --sensor-model DHT22 \
+  --latitude 40.7 --longitude=-74.0 \
+  --device-key device.key
 ```
 
 ### seal verify - Verify Archives
 
-Verify the cryptographic integrity of a .seal archive.
+Verify the cryptographic integrity of a .seal archive. Verification is
+**public-key only** and rejects any archive that is not `trst_version` 0.2.0.
 
 ```bash
-seal verify <ARCHIVE> --device-pub <PUBLIC_KEY>
+seal verify <ARCHIVE> --device-pub <PUBLIC_KEY> [--json] [--emit-receipt <PATH>]
 ```
 
 #### Arguments
@@ -235,25 +251,40 @@ seal verify <ARCHIVE> --device-pub <PUBLIC_KEY>
 | Argument | Description | Example |
 |----------|-------------|---------|
 | `<ARCHIVE>` | Path to .seal archive directory | `recording.seal` |
-| `--device-pub <KEY>` | Device public key for verification | `--device-pub "ed25519:GAUpGXoor5gP..."` |
+| `--device-pub <KEY>` | Signer public key: `ed25519:<base64>` or `ecdsa-p256:<base64>` (a bare key is treated as ed25519) | `--device-pub "ed25519:GAUp..."` |
+| `--json` | Emit the verification report as JSON to stdout | `--json` |
+| `--emit-receipt <PATH>` | Write a JSON verification receipt to a file | `--emit-receipt receipt.json` |
+
+A V2 `.pub` file has two lines, so pass the Ed25519 line explicitly rather than
+`$(cat device.pub)`.
 
 #### Verification Process
 
-The verify command performs comprehensive validation:
+1. **Version check** - Reject non-`0.2.0` archives
+2. **Signature Verification** - Ed25519/ECDSA-P256 signature validation against the canonical manifest
+3. **Continuity + Integrity** - BLAKE3 chunk hashes and continuity chain validation
 
-1. **Signature Verification** - Ed25519 signature validation against manifest
-2. **Chunk Integrity** - BLAKE3 hash verification of all chunk files
-3. **Continuity Checks** - Temporal and sequential consistency validation
-4. **Duration Sanity** - Detection of unrealistic time segments
+#### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Verification passed |
+| `10` | Signature verification failed |
+| `11` | Continuity chain verification failed |
+| `12` | Integrity / schema / IO error (bad archive, missing chunk, unsupported version) |
+| `14` | Internal canonicalization error |
+| `1` | General error |
 
 #### Example Usage
 
 ```bash
-# Basic verification
-seal verify recording.seal --device-pub "ed25519:GAUpGXoor5gP6JDkeVtj/PV4quuyLlZlojizplendEUlSU="
+# Basic verification (pass the ed25519 line from the two-line .pub)
+seal verify recording.seal --device-pub "$(grep '^ed25519:' device.pub)"
 
-# Verify with stored public key
-seal verify evidence.seal --device-pub "$(cat device.pub)"
+# JSON output plus a written receipt
+seal verify evidence.seal \
+  --device-pub "$(grep '^ed25519:' device.pub)" \
+  --json --emit-receipt receipt.json
 ```
 
 #### Verification Output
@@ -266,24 +297,35 @@ Segments: 16  Duration(s): 32.0  Chunk(s): 2.0
 
 ### seal unwrap - Decrypt Archives
 
-Decrypt a .seal archive and recover the original data.
+Decrypt a .seal archive and recover the original data. **Any recipient** of the
+archive decrypts with its own key bundle (the device owner, or an auditor added
+via `--recipient` at wrap time). The signature is always verified against the
+manifest's embedded `device.public_key`; `--device-pub` optionally pins which
+signer you expect.
 
 ```bash
-seal unwrap <ARCHIVE> --device-key <KEY_PATH> --out <OUTPUT> [--unencrypted]
+seal unwrap <ARCHIVE> --device-key <KEY_PATH> --out <OUTPUT> [--device-pub <KEY>] [--unencrypted]
 ```
 
 | Argument | Description |
 |----------|-------------|
 | `<ARCHIVE>` | Path to .seal archive directory |
-| `--device-key <PATH>` | Path to device private key file |
+| `--device-key <PATH>` | Path to the recipient's own key bundle (device owner or auditor) |
 | `--out <PATH>` | Output path for recovered data |
-| `--unencrypted` | Read key without passphrase prompt (CI/automation only) |
+| `--device-pub <KEY>` | Optional expected signer (`ed25519:<base64>`); fails if it differs from the manifest's signer |
+| `--unencrypted` | Read a plaintext key bundle without a passphrase prompt (CI/automation only) |
 
 ```bash
-# Recover data from an archive (passphrase prompted if key is encrypted)
+# Recover data from an archive (passphrase prompted if the key bundle is encrypted)
 seal unwrap recording.seal --device-key device.key --out recovered.bin
 
-# Recover without passphrase (unencrypted key)
+# Recover and pin the expected signer
+seal unwrap recording.seal \
+  --device-key device.key \
+  --device-pub "$(grep '^ed25519:' device.pub)" \
+  --out recovered.bin
+
+# Recover with an unencrypted key bundle (CI)
 seal unwrap recording.seal --device-key device.key --out recovered.bin --unencrypted
 ```
 
@@ -292,13 +334,13 @@ seal unwrap recording.seal --device-key device.key --out recovered.bin --unencry
 Submit an archive to a Sealedge platform server for remote verification.
 
 ```bash
-seal emit-request --archive <PATH> --device-pub <KEY> --out <PATH> [--post <URL>]
+seal emit-request --archive <PATH> --device-pub <PUB_FILE> --out <PATH> [--post <URL>]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--archive <PATH>` | Path to .seal archive directory |
-| `--device-pub <KEY>` | Device public key (ed25519: prefixed string) |
+| `--device-pub <PATH>` | Path to the device `.pub` file (the Ed25519 line is selected) |
 | `--out <PATH>` | Output path for the JSON verification request |
 | `--post <URL>` | POST the request to this platform endpoint |
 
@@ -314,12 +356,16 @@ seal emit-request --archive archive.seal --device-pub device.pub --out request.j
 
 ## Encrypted Key Files
 
-Device private keys are encrypted at rest using PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM (format: `SEALEDGE-KEY-V1`). A passphrase is prompted at runtime.
+A device key **bundle** — an Ed25519 signing key plus an independent X25519
+key-agreement key — is stored together as a `SEALEDGE-KEY-V2` file, encrypted at
+rest using PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM. A passphrase is
+prompted at runtime. (Legacy single-key `SEALEDGE-KEY-V1` files are rejected —
+re-run `seal keygen`.)
 
 For CI/automation where interactive prompts are not possible, use `--unencrypted`:
-- `seal keygen --unencrypted` — generates plaintext key file
-- `seal wrap --unencrypted` — reads key without passphrase prompt
-- `seal unwrap --unencrypted` — reads key without passphrase prompt
+- `seal keygen --unencrypted` — generates a plaintext key bundle
+- `seal wrap --unencrypted` — reads a plaintext key bundle without a passphrase prompt
+- `seal unwrap --unencrypted` — reads a plaintext key bundle without a passphrase prompt
 
 **Production devices should always use encrypted key files.** The `--unencrypted` flag is an explicit escape hatch.
 
@@ -342,8 +388,8 @@ sealedge [OPTIONS]
 | Option | Description | Example |
 |--------|-------------|---------|
 | `-i, --input <INPUT>` | Input file (any binary data) | `--input document.pdf` |
-| `-o, --out <OUT>` | Output file path | `--out decrypted.pdf` |
-| `--envelope <ENVELOPE>` | Write encrypted envelope to .seal file | `--envelope encrypted.seal` |
+| `-o, --out <OUT>` | Output file path. **Required in both modes** — in encrypt mode it receives a round-trip plaintext copy (use `/dev/null` to discard) | `--out decrypted.pdf` |
+| `--envelope <ENVELOPE>` | Write the encrypted envelope (a `.trst` file) to this path | `--envelope encrypted.trst` |
 | `--decrypt` | Decrypt mode (read from --input, write to --out) | `--decrypt` |
 
 #### Chunk Configuration
@@ -374,18 +420,18 @@ sealedge [OPTIONS]
 #### Example Usage
 
 ```bash
-# Basic file encryption
-sealedge --input document.pdf --envelope encrypted.seal --key-out mykey.hex
+# Basic file encryption (--out receives a round-trip copy; /dev/null discards it)
+sealedge --input document.pdf --out /dev/null --envelope encrypted.trst --key-out mykey.hex
 
 # Decrypt file
-sealedge --decrypt --input encrypted.seal --out recovered.pdf --key-hex $(cat mykey.hex)
+sealedge --decrypt --input encrypted.trst --out recovered.pdf --key-hex $(cat mykey.hex)
 
 # Encrypt with keyring
 sealedge --set-passphrase "my_secure_passphrase"
-sealedge --input file.txt --envelope file.seal --use-keyring --salt-hex "abcdef1234567890abcdef1234567890"
+sealedge --input file.txt --out /dev/null --envelope file.trst --use-keyring --salt-hex "abcdef1234567890abcdef1234567890"
 
 # Inspect without decryption
-sealedge --input encrypted.seal --inspect
+sealedge --input encrypted.trst --inspect
 ```
 
 ### Network Operations
@@ -414,73 +460,82 @@ sealedge-client --server <ADDRESS> [OPTIONS]
 | Option | Description | Example |
 |--------|-------------|---------|
 | `--server <ADDR>` | Server address | `--server 127.0.0.1:8080` |
-| `--input <FILE>` | File to send | `--input document.txt` |
-| `--require-auth` | Use mutual authentication | `--require-auth` |
-| `--key-hex <KEY>` | Shared encryption key | `--key-hex $(cat shared.key)` |
+| `--file <FILE>` | File to send | `--file document.txt` |
+| `--enable-auth` | Use mutual authentication (server enables it with `--require-auth`) | `--enable-auth` |
+| `--server-cert <PATH>` | Trusted server certificate (for auth) | `--server-cert server.cert` |
+| `--key-hex <KEY>` | Shared encryption key (no-auth mode only) | `--key-hex $(cat shared.key)` |
+
+With authentication the session key is derived via X25519 ECDH, so `--key-hex` is
+only needed in the no-auth mode.
 
 #### Network Example
 
 ```bash
-# Start authenticated server
-sealedge-server --listen 127.0.0.1:8080 --require-auth --decrypt --key-hex $(openssl rand -hex 32)
+# Authenticated: server requires auth, client enables it (no shared key needed)
+sealedge-server --listen 127.0.0.1:8080 --require-auth --decrypt
+sealedge-client --server 127.0.0.1:8080 --file file.txt --enable-auth --server-cert sealedge-server.cert
 
-# Connect with authenticated client
-sealedge-client --server 127.0.0.1:8080 --input file.txt --require-auth --key-hex $(cat shared.key)
+# No-auth: both sides share the same AES-256 key
+sealedge-server --listen 127.0.0.1:8080 --decrypt --key-hex $(openssl rand -hex 32)
+sealedge-client --server 127.0.0.1:8080 --file file.txt --key-hex $(cat shared.key)
 ```
 
 ---
 
 ## Complete Workflows
 
-### Secure Evidence Chain
+### Signed Evidence Archives with a Shared Device Key
 
-Create a cryptographically linked chain of evidence archives:
+Sign multiple evidence archives with one device key so they all verify against
+the same public key. (There is no archive-chaining flag; each archive is
+independently signed and verified.)
 
 ```bash
-# First archive
-seal wrap --in evidence_001.bin --out evidence_001.seal --device-id "CAM-COURT-01"
-HASH_001=$(blake3sum evidence_001.seal/manifest.json | cut -d' ' -f1)
+# Generate one device key bundle for the source device
+seal keygen --out-key device.key --out-pub device.pub
 
-# Linked archive
-seal wrap --in evidence_002.bin --out evidence_002.seal --device-id "CAM-COURT-01" --prev-archive-hash "$HASH_001"
+# Wrap each piece of evidence with that key
+seal wrap --in evidence_001.bin --out evidence_001.seal --device-key device.key
+seal wrap --in evidence_002.bin --out evidence_002.seal --device-key device.key
 
-# Verify chain
-seal verify evidence_001.seal --device-pub "$(cat device.pub)"
-seal verify evidence_002.seal --device-pub "$(cat device.pub)"
+# Verify each archive (pass the ed25519 line from the two-line .pub)
+seal verify evidence_001.seal --device-pub "$(grep '^ed25519:' device.pub)"
+seal verify evidence_002.seal --device-pub "$(grep '^ed25519:' device.pub)"
 ```
 
 ### Hybrid Encryption + Archive
 
-Combine envelope encryption with archive format:
+Combine envelope encryption with the archive format:
 
 ```bash
-# Encrypt sensitive data
-sealedge --input sensitive.pdf --envelope encrypted.seal --key-out secret.key
+# Encrypt sensitive data into an envelope (--out discards the round-trip copy)
+sealedge --input sensitive.pdf --out /dev/null --envelope encrypted.trst --key-out secret.key
 
-# Archive the encrypted envelope
-seal wrap --in encrypted.seal --out archived.seal --profile data.secure
+# Archive the encrypted envelope (default generic profile; sign-only keeps it as-is)
+seal wrap --sign-only --in encrypted.trst --out archived.seal --device-key device.key
 
 # Verify archive integrity
-seal verify archived.seal --device-pub "$(cat device.pub)"
+seal verify archived.seal --device-pub "$(grep '^ed25519:' device.pub)"
 
-# Recover data
-sealedge --decrypt --input encrypted.seal --out recovered.pdf --key-hex $(cat secret.key)
+# Recover the envelope, then decrypt it
+seal unwrap archived.seal --device-key device.key --out encrypted.trst
+sealedge --decrypt --input encrypted.trst --out recovered.pdf --key-hex $(cat secret.key)
 ```
 
 ### Network + Archive Pipeline
 
-Stream encrypted data over network and archive:
+Stream data over the network, then archive it:
 
 ```bash
-# Server: receive and archive
-sealedge-server --listen 127.0.0.1:8080 --decrypt --key-hex $(cat shared.key) &
+# Server: receive and decrypt into a directory
+sealedge-server --listen 127.0.0.1:8080 --decrypt --key-hex $(cat shared.key) --output-dir received/ &
 SERVER_PID=$!
 
-# Client: send encrypted data
-sealedge-client --server 127.0.0.1:8080 --input data.bin --key-hex $(cat shared.key)
+# Client: send data
+sealedge-client --server 127.0.0.1:8080 --file data.bin --key-hex $(cat shared.key)
 
-# Archive received data
-seal wrap --in received_data.bin --out network_archive.seal
+# Archive the received data
+seal wrap --in received/data.bin --out network_archive.seal --device-key device.key
 
 # Cleanup
 kill $SERVER_PID
@@ -519,7 +574,7 @@ kill $SERVER_PID
 
 ```bash
 # Run with debug logging
-RUST_LOG=debug sealedge --input file.txt --envelope test.seal --key-out test.key 2>&1 | head -20
+RUST_LOG=debug sealedge --input file.txt --out /dev/null --envelope test.trst --key-out test.key 2>&1 | head -20
 
 # Test archive validation
 cargo test -p sealedge-seal-cli --test acceptance -- --nocapture

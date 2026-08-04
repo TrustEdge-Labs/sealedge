@@ -14,7 +14,7 @@ Development workflows and project management examples.
 ### Development Workflow Integration
 
 ```bash
-# Pre-commit hook for secure builds
+# Pre-commit hook for attested builds
 #!/bin/bash
 # .git/hooks/pre-commit
 
@@ -22,11 +22,22 @@ Development workflows and project management examples.
 cargo build --release
 cargo test
 
-# Create attestation for development build
-./target/release/sealedge-attest \
-  --file target/release/my-app \
-  --builder-id "dev-$(whoami)" \
-  --output dev-attestation.seal
+# One-time (or cached) signing key for the build machine
+# (use --unencrypted only in automation where no passphrase prompt is possible)
+[ -f build.key ] || ./target/release/seal keygen \
+  --out-key build.key --out-pub build.pub --unencrypted
+
+# Generate a CycloneDX SBOM (e.g. via cargo-cyclonedx)
+cargo cyclonedx --format json
+
+# Bind the SBOM to the binary with an Ed25519 point attestation
+./target/release/seal attest-sbom \
+  --binary target/release/seal \
+  --sbom bom.json \
+  --device-key build.key \
+  --device-pub build.pub \
+  --out dev-attestation.se-attestation.json \
+  --unencrypted
 
 echo "✔ Development build attested"
 ```
@@ -35,18 +46,18 @@ echo "✔ Development build attested"
 
 ```bash
 # Debug mode with verbose logging
-RUST_LOG=debug ./target/release/sealedge-core \
+RUST_LOG=debug ./target/release/sealedge \
   --input test.txt \
+  --out /dev/null \
   --envelope debug.seal \
   --key-out debug.key \
   --verbose
 
-# Inspect internal state
-./target/release/sealedge-core \
+# Inspect internal state without decrypting
+./target/release/sealedge \
   --input debug.seal \
   --inspect \
-  --verbose \
-  --debug-chunks
+  --verbose
 ```
 
 ### Testing Workflows
@@ -60,12 +71,13 @@ echo "Running Sealedge integration tests..."
 
 # Test basic encryption/decryption
 echo "Test data" > test_input.txt
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input test_input.txt \
+  --out /dev/null \
   --envelope test.seal \
   --key-out test.key
 
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input test.seal \
   --out test_output.txt \
@@ -99,12 +111,19 @@ fi
 # Build release
 cargo build --release --all-features
 
-# Create attestations for all binaries
-for binary in sealedge-core sealedge-server sealedge-client seal; do
-  ./target/release/sealedge-attest \
-    --file "target/release/$binary" \
-    --builder-id "release-$VERSION" \
-    --output "release/$binary-$VERSION.seal"
+# Generate an SBOM once for the workspace
+cargo cyclonedx --format json
+
+# Create SBOM attestations for all binaries
+mkdir -p release
+for binary in sealedge sealedge-server sealedge-client seal; do
+  ./target/release/seal attest-sbom \
+    --binary "target/release/$binary" \
+    --sbom bom.json \
+    --device-key build.key \
+    --device-pub build.pub \
+    --out "release/$binary-$VERSION.se-attestation.json" \
+    --unencrypted
 done
 
 echo "✔ Release $VERSION prepared with attestations"
@@ -122,11 +141,11 @@ for size in 1M 10M 100M; do
   dd if=/dev/urandom of="test_$size.bin" bs=1 count=$size 2>/dev/null
 
   start_time=$(date +%s.%N)
-  ./target/release/sealedge-core \
+  ./target/release/sealedge \
     --input "test_$size.bin" \
+    --out /dev/null \
     --envelope "test_$size.seal" \
-    --key-out "key_$size.hex" \
-    --quiet
+    --key-out "key_$size.hex"
   end_time=$(date +%s.%N)
 
   duration=$(echo "$end_time - $start_time" | bc)

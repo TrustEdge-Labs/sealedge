@@ -196,9 +196,10 @@ import init, { verify_archive } from './pkg/sealedge_seal_wasm.js';
 
 await init();
 
-// Verify an archive (drag folder into page, then)
-const result = verify_archive(/* archive data */);
-console.log(JSON.parse(result));
+// Verify an archive directory (user selects it via the directory picker)
+const dirHandle = await window.showDirectoryPicker();
+const result = await verify_archive(dirHandle, "ed25519:...");
+console.log(result);
 ```
 
 ---
@@ -240,15 +241,17 @@ Located in `crates/seal-wasm/src/lib.rs`:
 
 ```rust
 #[wasm_bindgen]
-pub fn verify_archive(archive_data: JsValue) -> Result<String, JsValue>;
+pub fn verify_manifest(manifest_bytes: Vec<u8>, device_pub: String) -> Result<JsValue, JsValue>;
 
 #[wasm_bindgen]
-pub fn verify_signature(
-    manifest_json: &str,
-    signature: &[u8],
-    public_key: &str
-) -> Result<bool, JsValue>;
+pub async fn verify_archive(
+    dir_handle: FileSystemDirectoryHandle,
+    device_pub: String,
+) -> Result<JsValue, JsValue>;
 ```
+
+Both gate on `trst_version == "0.2.0"` and return a `VerificationResult` object that
+serializes as exactly `{ signature, continuity, segment_count }`.
 
 **JavaScript Usage**:
 ```javascript
@@ -256,21 +259,14 @@ import init, { verify_archive } from './pkg/sealedge_seal_wasm.js';
 
 await init();
 
-// Verify entire archive
-const archiveData = {
-    manifest: manifestJson,
-    signature: signatureBytes,
-    chunks: [chunk1, chunk2, ...]
-};
-
-const result = JSON.parse(verify_archive(archiveData));
+// Verify an entire archive directory (user selects it via the directory picker)
+const dirHandle = await window.showDirectoryPicker();
+const result = await verify_archive(dirHandle, "ed25519:...");
 console.log(result);
 // {
 //   "signature": "pass",
 //   "continuity": "pass",
-//   "segments": 32,
-//   "duration_s": 64.0,
-//   "profile": "cam.video"
+//   "segment_count": 32
 // }
 ```
 

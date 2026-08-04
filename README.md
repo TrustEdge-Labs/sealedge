@@ -157,6 +157,10 @@ seal wrap --profile log --in access.log --out logs.seal \
   --device-key server.key --device-pub server.pub
 ```
 
+Archives are encrypted to the device's own X25519 key by default. Add extra readers with
+`--recipient x25519:<pub>` (repeatable), or produce signed-but-unencrypted archives with
+`--sign-only`.
+
 To decrypt and recover original data:
 
 ```bash
@@ -167,7 +171,7 @@ For cam.video-specific archives with frame rate and segment duration, see [examp
 
 ## How It Works
 
-**Security Posture (v6.0):** Sealedge uses RSA OAEP-SHA256 for all asymmetric operations. Envelopes are v2-only format with HKDF-SHA256 key derivation. Point attestations use Ed25519 signing over BLAKE3 hashes with random nonces (`.se-attestation.json`). Device private keys are encrypted at rest using SEALEDGE-KEY-V1 format (PBKDF2-HMAC-SHA256 600k + AES-256-GCM, versioned metadata); a passphrase is prompted at runtime. Key-holding structs zeroize memory on drop. Platform HTTP endpoints enforce a 2 MB body limit and per-IP rate limiting on `/v1/verify` and `/v1/verify-attestation`. JWKS signing key path is configurable via `JWKS_KEY_PATH`. Receipt TTL is configurable via `RECEIPT_TTL_SECS` (default 3600s). 471 tests across 9 workspace crates.
+**Security Posture (v6.0):** Sealedge uses X25519 ECDH with HKDF-SHA256 for envelope key agreement (RSA OAEP-SHA256 is used only in the optional hybrid encryption path). Envelopes are v2-only format with HKDF-SHA256 key derivation. Point attestations use Ed25519 signing over BLAKE3 hashes with random nonces (`.se-attestation.json`). Device private keys are encrypted at rest using SEALEDGE-KEY-V2 format (an Ed25519 signing key plus an independent X25519 key-agreement key, stored together; PBKDF2-HMAC-SHA256 600k + AES-256-GCM, versioned metadata); a passphrase is prompted at runtime. Key-holding structs zeroize memory on drop. Platform HTTP endpoints enforce a 2 MB body limit and per-IP rate limiting on `/v1/verify` and `/v1/verify-attestation`. JWKS signing key path is configurable via `JWKS_KEY_PATH`. Receipt TTL is configurable via `RECEIPT_TTL_SECS` (default 3600s). 471 tests across 9 workspace crates.
 
 **Two attestation modes:**
 
@@ -179,7 +183,7 @@ For cam.video-specific archives with frame rate and segment duration, see [examp
 
 **Stream Attestation** (for continuous data: video, audio, sensor readings):
 1. **Sign** -- Ed25519 keypair (or YubiKey ECDSA P-256) signs data at capture
-2. **Encrypt** -- Chunked AES-256-GCM encryption with HKDF-derived keys
+2. **Encrypt** -- Chunks encrypted under a per-archive random Content-Encryption Key (XChaCha20-Poly1305); the CEK is HPKE-wrapped (X25519) to one or more recipients
 3. **Wrap** -- Chunks, manifest, and signature packaged into a `.seal` archive with BLAKE3 continuity chain
 4. **Verify** -- Independent verification service checks signature, chain integrity, and manifest
 5. **Unwrap** -- Original data recovered after mandatory signature and chain verification

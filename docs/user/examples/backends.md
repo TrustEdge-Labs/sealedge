@@ -11,98 +11,99 @@ Universal Backend system and hardware integration examples.
 
 ## Universal Backend Workflows
 
-### Software HSM Backend
+The `sealedge` envelope CLI selects a key-management backend with `--backend`.
+Valid values are `keyring` (default), `tpm`, `hsm`, and `matter`. Use
+`--list-backends` to see what is available in your build.
+
+### List available backends
 
 ```bash
-# Use software HSM for key generation
-./target/release/sealedge-core \
+./target/release/sealedge --list-backends
+```
+
+### HSM Backend
+
+```bash
+# Use the HSM backend for key generation
+# (encrypt mode requires --out; /dev/null discards the round-trip copy)
+./target/release/sealedge \
   --input document.txt \
+  --out /dev/null \
   --envelope document.seal \
-  --backend software-hsm \
+  --backend hsm \
   --key-out generated.key
 ```
 
 ### Keyring Backend
 
+The keyring backend (`--set-passphrase`, `--use-keyring`, `--backend keyring`)
+requires a build with the `keyring` feature:
+`cargo build -p sealedge-cli --features keyring`.
+
 ```bash
 # Store passphrase in OS keyring
-./target/release/sealedge-core --set-passphrase "my secure passphrase"
+./target/release/sealedge --set-passphrase "my secure passphrase"
 
 # Use keyring-derived keys
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input file.txt \
+  --out /dev/null \
   --envelope file.seal \
   --backend keyring \
   --salt-hex $(openssl rand -hex 16)
+```
+
+### Backend-specific configuration
+
+Some backends accept extra settings via `--backend-config key=value` (repeatable):
+
+```bash
+./target/release/sealedge \
+  --input file.txt \
+  --out /dev/null \
+  --envelope file.seal \
+  --backend tpm \
+  --backend-config "device=/dev/tpm0"
 ```
 
 ## Hardware Backend Demonstrations
 
 ### YubiKey Examples (Library-Based)
 
-YubiKey functionality is accessed through **Rust examples**, not CLI flags:
+YubiKey connectivity is exercised through **Rust examples** in `sealedge-core`,
+built with the `yubikey` feature:
 
 ```bash
 # Verify YubiKey connectivity (auto-detects OpenSC)
-cargo run --example verify_yubikey --features yubikey
+cargo run -p sealedge-core --example verify_yubikey --features yubikey
 
-# Verify with custom PIN
-cargo run --example verify_yubikey_custom_pin --features yubikey -- YOUR_PIN
-
-# Full YubiKey integration demo
-cargo run --example yubikey_demo --features yubikey
-
-# Hardware certificate generation
-cargo run --example yubikey_certificate_demo --features yubikey
-
-# Hardware signing operations
-cargo run --example yubikey_hardware_signing_demo --features yubikey
-
-# QUIC with hardware-backed certificates
-cargo run --example yubikey_quic_hardware_demo --features yubikey
+# Verify with a custom PIN
+cargo run -p sealedge-core --example verify_yubikey_custom_pin --features yubikey -- YOUR_PIN
 ```
 
 **Note**: YubiKey operations require:
 - YubiKey with PIV applet
 - OpenSC PKCS#11 module: `sudo apt install opensc-pkcs11`
-- See `YUBIKEY_VERIFICATION.md` for setup guide
 
-### YubiKey Integration with CLI
+### YubiKey Hardware Signing (seal archives)
 
-The CLI supports YubiKey through the backend system:
+The `sealedge` envelope CLI does not currently sign with a YubiKey. Hardware
+signing is available in the `seal` archive tool, which signs a manifest with a
+YubiKey PIV key. Hardware signing is `--sign-only` (plaintext chunks); content
+encryption is software-backend only.
 
 ```bash
-# List available backends (includes yubikey if compiled with feature)
-./target/release/sealedge-core --list-backends
-
-# Use YubiKey backend for encryption (requires backend implementation)
-./target/release/sealedge-core \
-  --input sensitive.pdf \
-  --envelope sensitive.seal \
+# Sign a .seal archive with a YubiKey (requires the yubikey feature)
+cargo run -p sealedge-seal-cli --features yubikey -- wrap \
   --backend yubikey \
-  --backend-config "pin=YOUR_PIN" \
-  --backend-config "slot=9c"
-```
+  --sign-only \
+  --in data.bin \
+  --out archive.seal \
+  --device-key device.key \
+  --slot 9c
 
-**Current Status**: YubiKey examples are fully functional, CLI integration is in development.
-
-### Cross-Backend Compatibility
-
-```bash
-# Generate with software HSM
-./target/release/sealedge-core \
-  --input data.txt \
-  --envelope data.seal \
-  --backend software-hsm \
-  --key-out sw-key.hex
-
-# Decrypt with keyring (after importing key)
-./target/release/sealedge-core \
-  --decrypt \
-  --input data.seal \
-  --out recovered.txt \
-  --backend keyring \
-  --key-hex $(cat sw-key.hex)
+# Verify the resulting archive with the ecdsa-p256 public key it prints
+cargo run -p sealedge-seal-cli -- verify archive.seal --device-pub "ecdsa-p256:..."
 ```
 
 ---

@@ -7,7 +7,19 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 
 # .seal Archive System Examples
 
-The Sealedge .seal archive system provides secure archival with Ed25519 digital signatures and cryptographic chunk verification, ideal for evidence collection, security camera footage, and tamper-evident data storage.
+The Sealedge .seal archive system provides secure archival with Ed25519 digital
+signatures and cryptographic chunk verification, ideal for evidence collection,
+security camera footage, and tamper-evident data storage.
+
+Archives are **encrypted by default**: content is sealed under a per-archive
+random content-encryption key (XChaCha20-Poly1305), which is HPKE-wrapped to the
+device's X25519 key-agreement key (recipient #0). On disk each chunk is
+`[nonce:24][ciphertext]`. Use `--sign-only` for signed-but-plaintext chunks.
+
+If you omit `--device-key`, `wrap` auto-generates a `device.key` +
+`device.pub` bundle. The device `id` is **derived from the signing key** —
+there is no `--device-id` flag, and `model`/`firmware`/`resolution`/`codec`
+(cam.video) are fixed defaults in the manifest.
 
 ## Basic Archive Creation and Verification
 
@@ -16,21 +28,18 @@ The Sealedge .seal archive system provides secure archival with Ed25519 digital 
 # Create sample data
 echo "This is sensitive evidence data" > evidence.txt
 
-# Create a .seal archive with digital signature
-./target/release/seal wrap --in evidence.txt --out evidence.seal --device-id "DEVICE001"
+# Create a .seal archive (auto-generates device.key + device.pub, encrypts by default)
+./target/release/seal wrap --in evidence.txt --out evidence.seal --unencrypted
 
 # The archive directory structure:
-ls -la evidence.seal/
-# drwxr-xr-x  3 user user 4096 evidence.seal/
-# -rw-r--r--  1 user user  512 manifest.json    # Signed manifest
-# drwxr-xr-x  2 user user 4096 chunks/           # Chunk directory
-# -rw-r--r--  1 user user   32 chunks/00000.bin  # Data chunks
+ls -R evidence.seal/
+# evidence.seal/manifest.json          # Signed 0.2.0 manifest (incl. encryption block)
+# evidence.seal/signatures/manifest.sig
+# evidence.seal/chunks/00000.bin       # [nonce:24][ciphertext]
 
-# Extract the device public key for verification
-cat evidence.seal/manifest.json | grep -o '"device_pub_key":"[^"]*"' | cut -d'"' -f4 > device.pub
-
-# Verify the archive integrity
-./target/release/seal verify evidence.seal --device-pub "$(cat device.pub)"
+# Verify the archive integrity using the generated public key
+# (a V2 .pub has two lines; pass the ed25519 line)
+./target/release/seal verify evidence.seal --device-pub "$(grep '^ed25519:' device.pub)"
 ```
 
 **Expected verification output:**
@@ -44,20 +53,21 @@ Segments: 1  Duration(s): 0.0  Chunk(s): 1.0
 
 **High-quality video evidence archival:**
 ```bash
-# Create a video evidence archive with detailed metadata
+# Generate a reusable device key bundle first (prompts for a passphrase)
+./target/release/seal keygen --out-key cam.key --out-pub cam.pub
+
+# Create a cam.video archive. device.id is derived from the key; fps and
+# chunk duration are configurable, resolution/codec are fixed defaults.
 ./target/release/seal wrap \
   --in security_footage.bin \
   --out court_evidence.seal \
   --profile cam.video \
   --fps 60 \
-  --resolution 3840x2160 \
-  --device-model "SecureCam Pro X1" \
-  --device-id "CAM-COURTROOM-01" \
-  --started-at "2025-01-15T14:30:00Z" \
-  --tz "America/New_York"
+  --chunk-seconds 2.0 \
+  --device-key cam.key
 
-# Verify with stored device certificate
-./target/release/seal verify court_evidence.seal --device-pub "ed25519:GAUpGXoor5gP6JDkeVtj/PV4quuyLlZlojizplendEUlSU="
+# Verify with the stored device certificate
+./target/release/seal verify court_evidence.seal --device-pub "$(grep '^ed25519:' cam.pub)"
 
 # Example successful verification:
 # Signature: PASS
@@ -65,101 +75,82 @@ Segments: 1  Duration(s): 0.0  Chunk(s): 1.0
 # Segments: 16  Duration(s): 32.0  Chunk(s): 2.0
 ```
 
-## Continuous Evidence Chain
+## Sharing an Archive with an Auditor
 
-**Link multiple archives for tamper-evident chain:**
+An archive can be made readable by additional recipients at wrap time via
+repeatable `--recipient` flags (each an X25519 public key). Any recipient later
+decrypts with its own key bundle.
+
 ```bash
-# Create first archive in chain
+# Auditor generates and shares only their public key
+./target/release/seal keygen --out-key auditor.key --out-pub auditor.pub
+
+# Wrap for the device AND the auditor (pass the auditor's x25519 line)
 ./target/release/seal wrap \
-  --in segment_001.bin \
-  --out segment_001.seal \
-  --device-id "CAM-LOBBY-01"
+  --in evidence.txt \
+  --out shared.seal \
+  --device-key cam.key \
+  --recipient "$(grep '^x25519:' auditor.pub)"
 
-# Get hash for chain linking
-HASH_001=$(blake3sum segment_001.seal/manifest.json | cut -d' ' -f1)
-
-# Create linked archive
-./target/release/seal wrap \
-  --in segment_002.bin \
-  --out segment_002.seal \
-  --device-id "CAM-LOBBY-01" \
-  --prev-archive-hash "$HASH_001"
-
-# Verify the complete chain
-./target/release/seal verify segment_001.seal --device-pub "$(cat device.pub)"
-./target/release/seal verify segment_002.seal --device-pub "$(cat device.pub)"
-
-# Check chain linkage
-echo "Previous hash in segment_002: $(cat segment_002.seal/manifest.json | grep prev_archive_hash)"
-echo "Actual hash of segment_001: $HASH_001"
+# The auditor decrypts with their OWN key bundle
+./target/release/seal unwrap shared.seal --device-key auditor.key --out recovered.txt
 ```
 
 ## Large File Chunked Archival
 
 **Efficient handling of large files with custom chunk sizes:**
 ```bash
-# Archive large file with 4MB chunks for efficiency
+# Archive a large file with 4MB chunks
 ./target/release/seal wrap \
   --in large_dataset.bin \
   --out dataset.seal \
   --chunk-size 4194304 \
-  --device-model "DataLogger V2" \
-  --device-id "SENSOR-LAB-03"
+  --device-key cam.key
 
-# Archive with time-based chunking (for streaming data)
+# Archive audio with the audio profile (codec/sample-rate live here, not cam.video)
 ./target/release/seal wrap \
   --in audio_stream.bin \
   --out audio.seal \
-  --chunk-seconds 5.0 \
-  --profile cam.video \
-  --fps 48000 \
-  --codec "pcm_s16le"
+  --profile audio \
+  --sample-rate 48000 \
+  --bit-depth 16 \
+  --channels 2 \
+  --codec pcm \
+  --device-key cam.key
 
-# Verify large archive
-./target/release/seal verify dataset.seal --device-pub "$(cat device.pub)"
+# Verify a large archive
+./target/release/seal verify dataset.seal --device-pub "$(grep '^ed25519:' cam.pub)"
 ```
 
-## Hybrid Encryption + Archive Workflow
+## Recovering Data from an Archive
 
-**Combine envelope encryption with archive format for maximum security:**
+Encrypted archives are recovered with `seal unwrap` using a recipient's key
+bundle; the signature is verified against the manifest's embedded signing key.
+
 ```bash
-# Step 1: Encrypt sensitive data with envelope encryption
-./target/release/sealedge-core \
-  --input confidential.pdf \
-  --envelope encrypted.seal \
-  --key-out secret.key
+# Recover the original bytes (any recipient uses its own key bundle)
+./target/release/seal unwrap court_evidence.seal --device-key cam.key --out recovered.bin
 
-# Step 2: Archive the encrypted envelope with digital signatures
-./target/release/seal wrap \
-  --in encrypted.seal \
-  --out archived.seal \
-  --profile data.secure \
-  --device-id "VAULT-001"
-
-# Step 3: Verify archive integrity
-./target/release/seal verify archived.seal --device-pub "$(cat device.pub)"
-
-# Step 4: Recovery process
-# First extract the encrypted envelope (not shown here, requires archive extraction)
-# Then decrypt the envelope
-./target/release/sealedge-core \
-  --decrypt \
-  --input encrypted.seal \
-  --out recovered.pdf \
-  --key-hex $(cat secret.key)
+# Optionally pin the expected signer
+./target/release/seal unwrap court_evidence.seal \
+  --device-key cam.key \
+  --device-pub "$(grep '^ed25519:' cam.pub)" \
+  --out recovered.bin
 ```
 
 ## Archive Metadata Inspection
 
 **Examine archive contents without verification:**
 ```bash
-# Inspect manifest without full verification
+# Inspect the manifest (the signer's key is nested under device.public_key)
+cat evidence.seal/manifest.json | jq '.device.public_key'
 cat evidence.seal/manifest.json | jq .
 
 # Check archive structure
 find evidence.seal -type f -exec ls -lh {} \;
 
-# Verify individual chunk hashes manually
+# The manifest's blake3_hash for each segment is computed over the STORED chunk
+# bytes ([nonce:24][ciphertext] when encrypted), so this matches for each chunk:
 cd evidence.seal/chunks
 for chunk in *.bin; do
   echo -n "$chunk: "

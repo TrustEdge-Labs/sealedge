@@ -463,11 +463,11 @@ cargo test test_universal_backend_registry_management
 ```bash
 # Quick smoke test
 echo "test data" > input.txt
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input input.txt --out output.txt --envelope test.seal \
   --key-hex 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt --input test.seal --out decrypted.txt \
   --key-hex 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
@@ -484,19 +484,19 @@ echo "%PDF-1.4\n1 0 obj\n<<\n/Type /Catalog\n>>\nendobj" > test.pdf
 dd if=/dev/urandom bs=1024 count=1 of=test.bin 2>/dev/null
 
 # Test encryption with format detection
-./target/release/sealedge-core --input test.json --envelope test_json.seal --key-out json.key --verbose
-./target/release/sealedge-core --input test.pdf --envelope test_pdf.seal --key-out pdf.key --verbose
-./target/release/sealedge-core --input test.bin --envelope test_bin.seal --key-out bin.key --verbose
+./target/release/sealedge --input test.json --envelope test_json.seal --key-out json.key --verbose
+./target/release/sealedge --input test.pdf --envelope test_pdf.seal --key-out pdf.key --verbose
+./target/release/sealedge --input test.bin --envelope test_bin.seal --key-out bin.key --verbose
 
 # Test inspection
-./target/release/sealedge-core --input test_json.seal --inspect --verbose
-./target/release/sealedge-core --input test_pdf.seal --inspect --verbose
-./target/release/sealedge-core --input test_bin.seal --inspect --verbose
+./target/release/sealedge --input test_json.seal --inspect --verbose
+./target/release/sealedge --input test_pdf.seal --inspect --verbose
+./target/release/sealedge --input test_bin.seal --inspect --verbose
 
 # Test decryption with format awareness
-./target/release/sealedge-core --decrypt --input test_json.seal --out restored.json --key-hex $(cat json.key) --verbose
-./target/release/sealedge-core --decrypt --input test_pdf.seal --out restored.pdf --key-hex $(cat pdf.key) --verbose
-./target/release/sealedge-core --decrypt --input test_bin.seal --out restored.bin --key-hex $(cat bin.key) --verbose
+./target/release/sealedge --decrypt --input test_json.seal --out restored.json --key-hex $(cat json.key) --verbose
+./target/release/sealedge --decrypt --input test_pdf.seal --out restored.pdf --key-hex $(cat pdf.key) --verbose
+./target/release/sealedge --decrypt --input test_bin.seal --out restored.bin --key-hex $(cat bin.key) --verbose
 
 # Verify format preservation
 diff test.json restored.json
@@ -533,7 +533,7 @@ file restored.pdf   # Should show PDF document
 # Test different file sizes
 for size in 100 1000 10000 100000; do
   dd if=/dev/urandom of=test_${size}.bin bs=1 count=$size
-  ./target/release/sealedge-core \
+  ./target/release/sealedge \
     --input test_${size}.bin \
     --envelope test_${size}.seal \
     --key-hex $(openssl rand -hex 32)
@@ -544,8 +544,8 @@ done
 #### 2. Key Management Validation
 ```bash
 # Test keyring backend
-./target/release/sealedge-core --set-passphrase "test_passphrase"
-./target/release/sealedge-core \
+./target/release/sealedge --set-passphrase "test_passphrase"
+./target/release/sealedge \
   --input test.txt \
   --envelope keyring_test.seal \
   --backend keyring \
@@ -553,7 +553,7 @@ done
   --use-keyring
 
 # Verify decryption works
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input keyring_test.seal \
   --out keyring_decrypted.txt \
@@ -576,9 +576,9 @@ done
 **Quick Validation Tests:**
 ```bash
 # Test error reporting for common issues
-./target/release/sealedge-core --decrypt --input nonexistent.seal    # File not found
-./target/release/sealedge-core --salt-hex "invalid"                  # Invalid salt
-./target/release/sealedge-core --backend nonexistent                 # Invalid backend
+./target/release/sealedge --decrypt --input nonexistent.seal    # File not found
+./target/release/sealedge --salt-hex "invalid"                  # Invalid salt
+./target/release/sealedge --backend nonexistent                 # Invalid backend
 ```
 
 [↑ Back to top](#table-of-contents)
@@ -594,13 +594,13 @@ done
 dd if=/dev/urandom of=large_test.bin bs=1M count=100
 
 # Time encryption
-time ./target/release/sealedge-core \
+time ./target/release/sealedge \
   --input large_test.bin \
   --envelope large_test.seal \
   --key-hex $(openssl rand -hex 32)
 
 # Time decryption
-time ./target/release/sealedge-core \
+time ./target/release/sealedge \
   --decrypt \
   --input large_test.seal \
   --out large_decrypted.bin \
@@ -611,7 +611,7 @@ time ./target/release/sealedge-core \
 
 ```bash
 # Monitor memory usage during processing
-/usr/bin/time -v ./target/release/sealedge-core \
+/usr/bin/time -v ./target/release/sealedge \
   --input large_test.bin \
   --envelope large_test.seal \
   --key-hex $(openssl rand -hex 32)
@@ -623,7 +623,7 @@ time ./target/release/sealedge-core \
 # Test different chunk sizes
 for chunk_size in 1024 4096 8192 16384 65536; do
   echo "Testing chunk size: $chunk_size"
-  time ./target/release/sealedge-core \
+  time ./target/release/sealedge \
     --input test_1mb.bin \
     --envelope test_chunk_${chunk_size}.seal \
     --chunk $chunk_size \
@@ -678,7 +678,7 @@ cargo test -p sealedge-core test_chain_integrity_validation
 **Manual Security Validation:**
 ```bash
 # Test envelope tampering detection
-./target/release/sealedge-core \
+./target/release/sealedge \
   --input test.txt \
   --envelope original.seal \
   --key-out test.key
@@ -687,7 +687,7 @@ cargo test -p sealedge-core test_chain_integrity_validation
 dd if=/dev/urandom of=original.seal bs=1 seek=100 count=10 conv=notrunc
 
 # Verify tampering is detected
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input original.seal \
   --out should_fail.txt \
@@ -696,7 +696,7 @@ dd if=/dev/urandom of=original.seal bs=1 seek=100 count=10 conv=notrunc
   --key-hex $(openssl rand -hex 32)
 
 # Verify wrong key detection (should fail)
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input test.seal \
   --out should_fail.txt \
@@ -707,7 +707,7 @@ dd if=/dev/urandom of=original.seal bs=1 seek=100 count=10 conv=notrunc
 #### 2. Salt Validation Tests
 ```bash
 # Test PBKDF2 validation (should fail)
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input keyring_test.seal \
   --out should_fail.txt \
@@ -740,7 +740,7 @@ dd if=/dev/urandom of=original.seal bs=1 seek=100 count=10 conv=notrunc
 # Terminal 2: Test client connection
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input test_audio.wav \
+  --file test_audio.wav \
   --key-hex $(cat shared_key.hex) \
   --verbose
 ```
@@ -750,7 +750,7 @@ dd if=/dev/urandom of=original.seal bs=1 seek=100 count=10 conv=notrunc
 # Test connection failure handling
 ./target/release/sealedge-client \
   --server 127.0.0.1:9999 \
-  --input test.wav \
+  --file test.wav \
   --key-hex $(openssl rand -hex 32) \
   --retry-attempts 3 \
   --connect-timeout 5
@@ -759,8 +759,8 @@ dd if=/dev/urandom of=original.seal bs=1 seek=100 count=10 conv=notrunc
 # Test authentication flow (if authentication enabled)
 ./target/release/sealedge-client \
   --server 127.0.0.1:8080 \
-  --input test.wav \
-  --require-auth \
+  --file test.wav \
+  --enable-auth \
   --client-identity "Test Client" \
   --verbose
 ```
@@ -815,7 +815,7 @@ The CI pipeline runs:
 cargo build --release --features audio
 
 # Verify audio features are enabled
-./target/release/sealedge-core --help | grep -i audio
+./target/release/sealedge --help | grep -i audio
 ```
 
 **Install System Dependencies:**
@@ -840,7 +840,7 @@ brew install sox  # For audio testing utilities
 
 ```bash
 # Always start with device discovery
-./target/release/sealedge-core --list-audio-devices
+./target/release/sealedge --list-audio-devices
 ```
 
 **Expected Output Examples:**
@@ -856,14 +856,14 @@ Available audio input devices:
 
 ```bash
 # Test with system default device
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --max-duration 3 \
   --envelope test_default_device.seal \
   --key-hex $(openssl rand -hex 32)
 
 # Test with specific device
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "hw:CARD=PCH,DEV=0" \
   --max-duration 3 \
@@ -913,7 +913,7 @@ sudo usermod -a -G audio $USER
 # Enable for Terminal or your application
 
 # Test with PulseAudio (Linux)
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "pulse" \
   --max-duration 5 \
@@ -937,7 +937,7 @@ alsamixer  # Linux - check capture levels
 # Windows: Sound Settings → Input → Device Properties
 
 # Test with verbose output
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "default" \
   --max-duration 5 \
@@ -956,10 +956,10 @@ Error: Audio device "wrong_name" not found
 **Solutions:**
 ```bash
 # Always check exact device names first
-./target/release/sealedge-core --list-audio-devices
+./target/release/sealedge --list-audio-devices
 
 # Copy device name exactly (with quotes)
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "hw:CARD=USB_AUDIO,DEV=0" \
   --max-duration 5 \
@@ -979,7 +979,7 @@ Error: Audio device "wrong_name" not found
 **Solutions:**
 ```bash
 # Check sample rate compatibility
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --sample-rate 44100 \  # Try standard rates: 44100, 48000
   --channels 1 \         # Start with mono
@@ -989,7 +989,7 @@ Error: Audio device "wrong_name" not found
   --key-hex $(openssl rand -hex 32)
 
 # Test different configurations
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --sample-rate 48000 \
   --channels 2 \
@@ -1015,7 +1015,7 @@ Error: Audio device "wrong_name" not found
 #### Linux (ALSA/PulseAudio)
 ```bash
 # Test ALSA direct access
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "hw:CARD=PCH,DEV=0" \
   --max-duration 5 \
@@ -1023,7 +1023,7 @@ Error: Audio device "wrong_name" not found
   --key-hex $(openssl rand -hex 32)
 
 # Test PulseAudio integration
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "pulse" \
   --max-duration 5 \
@@ -1034,7 +1034,7 @@ Error: Audio device "wrong_name" not found
 #### macOS (Core Audio)
 ```bash
 # Test built-in microphone
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "Built-in Microphone" \
   --max-duration 5 \
@@ -1042,7 +1042,7 @@ Error: Audio device "wrong_name" not found
   --key-hex $(openssl rand -hex 32)
 
 # Test USB audio device
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --audio-device "USB Audio CODEC" \
   --max-duration 5 \
@@ -1053,14 +1053,14 @@ Error: Audio device "wrong_name" not found
 #### Windows (WASAPI)
 ```bash
 # Test default microphone
-./target/release/sealedge-core.exe \
+./target/release/sealedge.exe \
   --live-capture \
   --max-duration 5 \
   --envelope test_windows.seal \
   --key-hex $(openssl rand -hex 32)
 
 # Test specific device
-./target/release/sealedge-core.exe \
+./target/release/sealedge.exe \
   --live-capture \
   --audio-device "Microphone (Realtek Audio)" \
   --max-duration 5 \
@@ -1073,7 +1073,7 @@ Error: Audio device "wrong_name" not found
 #### 1. Round-trip Audio Test with Format Verification
 ```bash
 # Capture audio with known parameters
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --sample-rate 44100 \
   --channels 2 \
@@ -1083,7 +1083,7 @@ Error: Audio device "wrong_name" not found
   --verbose
 
 # Decrypt and verify (produces raw PCM f32le data)
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input captured_audio.seal \
   --out recovered_audio.raw \
@@ -1112,7 +1112,7 @@ for sample_rate in 22050 44100 48000; do
     echo "Testing ${sample_rate}Hz, ${channels} channel(s)"
     
     # Capture with specific parameters
-    ./target/release/sealedge-core \
+    ./target/release/sealedge \
       --live-capture \
       --sample-rate $sample_rate \
       --channels $channels \
@@ -1122,7 +1122,7 @@ for sample_rate in 22050 44100 48000; do
       --verbose
     
     # Decrypt to raw PCM
-    ./target/release/sealedge-core \
+    ./target/release/sealedge \
       --decrypt \
       --input test_${sample_rate}_${channels}ch.seal \
       --out test_${sample_rate}_${channels}ch.raw \
@@ -1145,7 +1145,7 @@ done
 #### 3. Audio Metadata Verification
 ```bash
 # Capture with metadata logging
-./target/release/sealedge-core \
+./target/release/sealedge \
   --live-capture \
   --sample-rate 48000 \
   --channels 2 \
@@ -1155,7 +1155,7 @@ done
   --verbose 2>&1 | tee capture_log.txt
 
 # Decrypt with metadata extraction
-./target/release/sealedge-core \
+./target/release/sealedge \
   --decrypt \
   --input metadata_test.seal \
   --out metadata_test.raw \
@@ -1180,9 +1180,9 @@ echo "PCM size: $pcm_size, Expected: $expected_size (tolerance: ±10%)"
 #### 2. Multi-Device Testing
 ```bash
 # Test all available devices
-for device in $(./target/release/sealedge-core --list-audio-devices | grep -o '"[^"]*"'); do
+for device in $(./target/release/sealedge --list-audio-devices | grep -o '"[^"]*"'); do
   echo "Testing device: $device"
-  ./target/release/sealedge-core \
+  ./target/release/sealedge \
     --live-capture \
     --audio-device $device \
     --max-duration 3 \

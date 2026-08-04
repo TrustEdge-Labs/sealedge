@@ -56,7 +56,7 @@ sealedge/
 
 - **Language**: Rust (stable) for memory safety and performance
 - **Cryptography**: AES-256-GCM, Ed25519, X25519 ECDH, HKDF-SHA256, RSA OAEP-SHA256, BLAKE3 with algorithm agility
-- **Key Files**: SEALEDGE-KEY-V1 format — PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM encryption at rest
+- **Key Files**: SEALEDGE-KEY-V2 format (Ed25519 signing key + independent X25519 key-agreement key) — PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM encryption at rest
 - **Audio**: Cross-platform support (Linux/ALSA, Windows/WASAPI, macOS/CoreAudio)
 - **Hardware**: YubiKey PIV operations via `yubikey` crate and PCSC
 - **Network**: Ed25519-based mutual authentication with X25519 ECDH session key derivation
@@ -139,23 +139,25 @@ Sealedge supports secure client-server communication with **Mutual Authenticatio
 
 ## .seal Archive Format
 
-The P0 `.seal` specification includes:
+The `.seal` archive specification (`trst_version` 0.2.0, C4) includes:
 
-- **Manifest Canonicalization**: Ordered JSON fields with signature exclusion
-- **BLAKE3 Continuity Chain**: Genesis seed `blake3("sealedge:genesis")` with segment linking
-- **XChaCha20-Poly1305 Encryption**: Per-segment encryption with unique nonces
-- **Ed25519 Signatures**: Device key signing with "ed25519:BASE64" format
+- **Manifest Canonicalization**: Fixed-order JSON fields with signature exclusion
+- **BLAKE3 Continuity Chain**: Genesis seed `blake3("sealedge:genesis")` with segment linking over the stored (ciphertext) bytes
+- **Content Encryption**: Per-archive random Content-Encryption Key (CEK) encrypts chunks with XChaCha20-Poly1305; the CEK is HPKE-wrapped (RFC 9180) to one or more recipients (recipient #0 = the device's X25519 key). A sign-only mode omits the `encryption` block and stores plaintext chunks.
+- **Ed25519 Signatures**: Device key signing with "ed25519:BASE64" format, covering the `encryption` block
+- **Dual Device Keys**: Ed25519 signing key plus an optional X25519 `key_agreement_public` key
+- **Profiles**: `generic` (default), `cam.video`, `sensor`, `audio`, `log`
 - **Archive Layout**: `clip-<id>.seal/` directory with manifest, signatures, and chunks
 
 ### Archive Directory Structure
 
 ```
 clip-<id>.seal/
-├── manifest.json           # Canonical cam.video manifest
+├── manifest.json           # Canonical 0.2.0 manifest (incl. optional encryption block)
 ├── signatures/
 │   └── manifest.sig        # Detached Ed25519 signature
 └── chunks/
-    ├── 00000.bin           # Zero-padded chunk files
+    ├── 00000.bin           # Zero-padded chunk files ([nonce:24][ciphertext] when encrypted)
     └── ...
 ```
 
@@ -182,7 +184,7 @@ cargo run -p sealedge-seal-cli -- unwrap archive.seal --device-key device.key --
 
 ## Testing and Quality Assurance
 
-Sealedge includes a comprehensive test suite with **406 automated tests** across 9 workspace crates:
+Sealedge includes a comprehensive test suite across 9 workspace crates:
 
 - **160+ Core Tests**: Envelope encryption, Universal Backend system, receipts, attestation, transport layer (includes 18 YubiKey simulation tests)
 - **4+ Auth Integration Tests**: Mutual authentication, session management, ECDH session key derivation, key uniqueness
