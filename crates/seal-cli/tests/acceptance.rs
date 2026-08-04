@@ -1,5 +1,3 @@
-#![cfg(feature = "legacy-v1-tests")]
-// C4 Phase 3b: gated pending migration to V2 keys / 0.2.0 archives / recipient model.
 //
 // Copyright (c) 2025 TRUSTEDGE LABS LLC
 // This source code is subject to the terms of the Mozilla Public License, v. 2.0.
@@ -33,6 +31,17 @@ fn write_sample_input(dir: &Path) -> PathBuf {
     input_path
 }
 
+/// The Ed25519 signing key line from a V2 `.pub` file (two lines: ed25519 + x25519).
+fn read_ed25519_pub(dir: &Path) -> String {
+    fs::read_to_string(dir.join("device.pub"))
+        .unwrap()
+        .lines()
+        .find(|l| l.trim().starts_with("ed25519:"))
+        .expect("ed25519 line in device.pub")
+        .trim()
+        .to_string()
+}
+
 fn wrap_archive(tempdir: &TempDir) -> (PathBuf, String) {
     let input = write_sample_input(tempdir.path());
     let archive_dir = tempdir.path().join("clip.seal");
@@ -57,7 +66,7 @@ fn wrap_archive(tempdir: &TempDir) -> (PathBuf, String) {
         .assert()
         .success();
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     (archive_dir, device_pub.trim().to_string())
 }
 
@@ -82,7 +91,7 @@ fn wrap_generic_archive(tempdir: &TempDir) -> (PathBuf, String) {
         .assert()
         .success();
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     (archive_dir, device_pub.trim().to_string())
 }
 
@@ -101,7 +110,13 @@ fn run_verify(tempdir: &TempDir, archive: &Path, device_pub: &str) -> assert_cmd
 
 fn decode_signing_key(path: &Path) -> SigningKey {
     let contents = fs::read_to_string(path).unwrap();
-    let (_, data) = contents.trim().split_once(':').unwrap();
+    // V2 plaintext bundle is JSON with an `ed25519_secret` field; fall back to a
+    // bare "ed25519:BASE64" string for any legacy input.
+    let secret_str = serde_json::from_str::<serde_json::Value>(contents.trim())
+        .ok()
+        .and_then(|v| v["ed25519_secret"].as_str().map(String::from))
+        .unwrap_or_else(|| contents.trim().to_string());
+    let (_, data) = secret_str.split_once(':').unwrap();
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .unwrap();
@@ -289,7 +304,7 @@ fn acceptance_generic_explicit_profile() {
         .assert()
         .success();
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
 
     let manifest_json = fs::read_to_string(archive_dir.join("manifest.json")).unwrap();
     let manifest_value: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
@@ -341,7 +356,7 @@ fn acceptance_generic_with_metadata() {
     );
 
     // Verify round-trip passes
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
 }
 
@@ -371,16 +386,21 @@ fn acceptance_keygen_creates_files() {
     assert!(key_path.exists(), "secret key file must be created");
     assert!(pub_path.exists(), "public key file must be created");
 
-    // Both must start with "ed25519:"
+    // V2: the key is a dual-key bundle (JSON with both secrets); the .pub carries
+    // both public keys, one per line.
     let key_content = fs::read_to_string(&key_path).unwrap();
     let pub_content = fs::read_to_string(&pub_path).unwrap();
     assert!(
-        key_content.trim().starts_with("ed25519:"),
-        "secret key must start with ed25519: prefix, got: {key_content}"
+        key_content.contains("ed25519_secret") && key_content.contains("x25519_secret"),
+        "secret bundle must contain both keys, got: {key_content}"
     );
     assert!(
-        pub_content.trim().starts_with("ed25519:"),
-        "public key must start with ed25519: prefix, got: {pub_content}"
+        pub_content.lines().any(|l| l.starts_with("ed25519:")),
+        "public file must contain an ed25519 key, got: {pub_content}"
+    );
+    assert!(
+        pub_content.lines().any(|l| l.starts_with("x25519:")),
+        "public file must contain an x25519 key, got: {pub_content}"
     );
 }
 
@@ -431,9 +451,13 @@ fn acceptance_keygen_roundtrip() {
         .assert()
         .success();
 
-    // Step 3: verify using the public key string from the generated file
-    let device_pub = fs::read_to_string(&pub_path).unwrap();
-    run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
+    // Step 3: verify using the Ed25519 public key line from the generated file
+    let pub_content = fs::read_to_string(&pub_path).unwrap();
+    let device_pub = pub_content
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap();
+    run_verify(&tempdir, &archive_dir, device_pub).success();
 }
 
 #[test]
@@ -498,7 +522,7 @@ fn acceptance_camvideo_still_works() {
         "cam.video manifest must include fps in metadata"
     );
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
 }
 
@@ -550,7 +574,7 @@ fn acceptance_sensor_wrap_verify() {
         "sensor_model must be present in sensor manifest metadata"
     );
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
 }
 
@@ -606,7 +630,7 @@ fn acceptance_audio_wrap_verify() {
         "codec must be present in audio manifest metadata"
     );
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
 }
 
@@ -662,7 +686,7 @@ fn acceptance_log_wrap_verify() {
         "log_format must be present in log manifest metadata"
     );
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
 }
 
@@ -717,7 +741,7 @@ fn acceptance_sensor_with_geo() {
         "altitude must be present in geo-tagged sensor manifest"
     );
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
 }
 
@@ -1049,7 +1073,7 @@ fn acceptance_backend_software_explicit() {
         "software backend must produce ed25519 signature"
     );
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
+    let device_pub = read_ed25519_pub(tempdir.path());
     run_verify(&tempdir, &archive_dir, device_pub.trim()).success();
 }
 

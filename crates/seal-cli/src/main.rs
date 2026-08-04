@@ -1619,13 +1619,20 @@ fn handle_verify_attestation(args: VerifyAttestationCmd) -> Result<()> {
     let attestation = PointAttestation::from_json(&attestation_json)
         .with_context(|| "Failed to parse attestation JSON")?;
 
-    // Resolve device public key: inline "ed25519:..." or file path
+    // Resolve device public key: inline "ed25519:..." or a .pub file path. A V2
+    // .pub carries two lines (ed25519 + x25519); attestations are Ed25519-signed,
+    // so select that line.
     let device_pub = if args.device_pub.starts_with("ed25519:") {
         args.device_pub.clone()
     } else {
         let content = fs::read_to_string(&args.device_pub)
             .with_context(|| format!("Failed to read public key file: {}", args.device_pub))?;
-        content.trim().to_string()
+        content
+            .lines()
+            .map(|l| l.trim())
+            .find(|l| l.starts_with("ed25519:"))
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| content.trim().to_string())
     };
 
     // Verify signature

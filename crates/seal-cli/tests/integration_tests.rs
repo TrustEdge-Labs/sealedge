@@ -1,5 +1,3 @@
-#![cfg(feature = "legacy-v1-tests")]
-// C4 Phase 3b: gated pending migration to V2 keys / 0.2.0 archives / recipient model.
 //
 // Copyright (c) 2025 TRUSTEDGE LABS LLC
 // This source code is subject to the terms of the Mozilla Public License, v. 2.0.
@@ -68,8 +66,11 @@ fn test_wrap_and_verify_basic_workflow() {
     assert!(temp_path.join("device.pub").exists());
 
     // Read the generated device public key
-    let device_pub = fs::read_to_string(temp_path.join("device.pub")).unwrap();
-    let device_pub = device_pub.trim();
+    let device_pub_file = fs::read_to_string(temp_path.join("device.pub")).unwrap();
+    let device_pub = device_pub_file
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap();
 
     // Run verify command
     let mut verify_cmd = Command::cargo_bin("seal").unwrap();
@@ -97,13 +98,20 @@ fn test_wrap_with_existing_device_key() {
     let input_file = temp_path.join("test-input.bin");
     fs::write(&input_file, b"Test with existing key").unwrap();
 
-    // Create device key file
+    // Generate an existing V2 key bundle up front, then wrap against it.
     let device_key_file = temp_path.join("my-device.key");
-    fs::write(
-        &device_key_file,
-        "ed25519:bz45Wwv6bA3XzesTxVt3IaKxWk8iC2MrcMS1+dDHQRs=\n",
-    )
-    .unwrap();
+    let device_pub_file = temp_path.join("my-device.pub");
+    Command::cargo_bin("seal")
+        .unwrap()
+        .arg("keygen")
+        .arg("--out-key")
+        .arg(&device_key_file)
+        .arg("--out-pub")
+        .arg(&device_pub_file)
+        .arg("--unencrypted")
+        .current_dir(temp_path)
+        .assert()
+        .success();
 
     // Create output archive path
     let output_archive = temp_path.join("test-archive.seal");
@@ -129,8 +137,12 @@ fn test_wrap_with_existing_device_key() {
         .stdout(predicate::str::contains("Segments: 1"))
         .stdout(predicate::str::contains("Generated device key").not());
 
-    // The corresponding public key for the test secret key
-    let expected_pub_key = "ed25519:fFdywmF53dtS8H34c8x4lfoLsp83trzL7N/x6Rb/xlI=";
+    // The Ed25519 public key line for the generated key.
+    let pub_content = fs::read_to_string(&device_pub_file).unwrap();
+    let expected_pub_key = pub_content
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap();
 
     // Run verify command
     let mut verify_cmd = Command::cargo_bin("seal").unwrap();
@@ -284,8 +296,11 @@ fn test_verify_emit_receipt() {
     cmd.assert().success();
 
     // Read the generated device public key
-    let device_pub = fs::read_to_string(temp_path.join("device.pub")).unwrap();
-    let device_pub = device_pub.trim();
+    let device_pub_file = fs::read_to_string(temp_path.join("device.pub")).unwrap();
+    let device_pub = device_pub_file
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap();
 
     // Test emit-receipt without --json (human output + receipt file)
     let receipt_path = temp_path.join("receipt.json");
@@ -372,13 +387,19 @@ fn test_seed_deterministic_output() {
     )
     .unwrap();
 
-    // Create device key for consistent results
+    // Generate a device key bundle for consistent results across wraps.
     let device_key_file = temp_path.join("test-device.key");
-    fs::write(
-        &device_key_file,
-        "ed25519:bz45Wwv6bA3XzesTxVt3IaKxWk8iC2MrcMS1+dDHQRs=\n",
-    )
-    .unwrap();
+    Command::cargo_bin("seal")
+        .unwrap()
+        .arg("keygen")
+        .arg("--out-key")
+        .arg(&device_key_file)
+        .arg("--out-pub")
+        .arg(temp_path.join("test-device.pub"))
+        .arg("--unencrypted")
+        .current_dir(temp_path)
+        .assert()
+        .success();
 
     // Create first archive with seed
     let output_archive1 = temp_path.join("test-archive1.seal");
@@ -508,8 +529,11 @@ fn test_a1_successful_verification() {
     wrap_cmd.assert().success();
 
     // Read device public key
-    let device_pub = fs::read_to_string(temp_path.join("device.pub")).unwrap();
-    let device_pub = device_pub.trim();
+    let device_pub_file = fs::read_to_string(temp_path.join("device.pub")).unwrap();
+    let device_pub = device_pub_file
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap();
 
     // A1: Successful verification should exit 0
     let mut verify_cmd = Command::cargo_bin("seal").unwrap();
@@ -663,8 +687,11 @@ fn test_a5_continuity_failure_with_json() {
     wrap_cmd.assert().success();
 
     // Read device public key
-    let device_pub = fs::read_to_string(temp_path.join("device.pub")).unwrap();
-    let device_pub = device_pub.trim();
+    let device_pub_file = fs::read_to_string(temp_path.join("device.pub")).unwrap();
+    let device_pub = device_pub_file
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap();
 
     // Corrupt a chunk file to cause continuity failure
     let chunk_file = output_archive.join("chunks").join("00000.bin");

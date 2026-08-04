@@ -1,5 +1,3 @@
-#![cfg(feature = "legacy-v1-tests")]
-// C4 Phase 3b: gated pending migration to V2 keys / 0.2.0 archives / recipient model.
 //
 // Copyright (c) 2025 TRUSTEDGE LABS LLC
 // This source code is subject to the terms of the Mozilla Public License, v. 2.0.
@@ -65,8 +63,13 @@ fn wrap_unencrypted_archive(tempdir: &TempDir) -> (PathBuf, String) {
         .assert()
         .success();
 
-    let device_pub = fs::read_to_string(tempdir.path().join("device.pub")).unwrap();
-    (archive_dir, device_pub.trim().to_string())
+    let device_pub = fs::read_to_string(tempdir.path().join("device.pub"))
+        .unwrap()
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap()
+        .to_string();
+    (archive_dir, device_pub)
 }
 
 /// Create an archive using a pre-generated unencrypted key (keygen first, then wrap).
@@ -117,8 +120,13 @@ fn wrap_encrypted_archive(tempdir: &TempDir) -> (PathBuf, String, PathBuf) {
         .assert()
         .success();
 
-    let device_pub = fs::read_to_string(&pub_path).unwrap();
-    (archive_dir, device_pub.trim().to_string(), key_path)
+    let device_pub = fs::read_to_string(&pub_path)
+        .unwrap()
+        .lines()
+        .find(|l| l.starts_with("ed25519:"))
+        .unwrap()
+        .to_string();
+    (archive_dir, device_pub, key_path)
 }
 
 /// Run `trst verify <archive> --device-pub <pub>` and return the assert handle.

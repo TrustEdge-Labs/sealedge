@@ -22,10 +22,6 @@ maintained = true
 
 [features]
 yubikey = ["sealedge-core/yubikey"]
-# C4 Phase 3b: the pre-C4 acceptance/security tests are coupled to the V1 key
-# format and 0.1.0 archives. They are gated off by default pending migration to
-# the V2 / 0.2.0 / recipient model (tracked as C4 Phase 3b). Enable to run them.
-legacy-v1-tests = []
 
 [dependencies]
 anyhow = { workspace = true }
