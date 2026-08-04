@@ -7,8 +7,8 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 
 # C4 — Content-Encryption Redesign: per-archive CEK, HPKE recipients, forward secrecy
 
-**Status:** Proposed (design approved; implementation pending)
-**Date:** 2026-08-03
+**Status:** Approved with amendments (M1–M5 incorporated); implementation pending
+**Date:** 2026-08-03 (revised same day for review amendments M1–M5)
 **Owner:** Platform / crypto
 **Supersedes:** the master-key content-encryption model in `docs/technical/format.md` (`.trst` `trst_version` `0.1.0`)
 **Related:** `docs/technical/threat-model.md`, `docs/technical/format.md`, security finding **C4**
@@ -80,7 +80,7 @@ SEALEDGE-KEY-V2\n
 
 - `keygen` emits `--out-key` (V2 bundle) and `--out-pub` containing **both** public keys:
   `ed25519:<b64>\nx25519:<b64>\n`.
-- `SEALEDGE-KEY-V1` files are read for a deprecation window **only to derive a fresh X25519 key is NOT possible** (independent key), so V1 keys must be re-issued for content ops. `seal keygen --migrate --in-key old.key` MAY generate a new X25519 key alongside the existing Ed25519 key and write a V2 bundle (owner keeps the same identity, gains a key-agreement key). Verification of old signatures is unaffected.
+- A `SEALEDGE-KEY-V1` file cannot become a V2 bundle automatically: the X25519 key is independent and cannot be derived from the Ed25519 secret. `seal keygen --migrate --in-key old.key` preserves the existing Ed25519 identity and **adds** a freshly generated X25519 key-agreement key, writing a V2 bundle. Verification of old signatures is unaffected.
 - The `--unencrypted` escape hatch is preserved for CI.
 
 ### 4.2 Recipient references
@@ -100,13 +100,24 @@ Per RFC 9180, using the [`hpke`](https://crates.io/crates/hpke) crate (pure-Rust
 
 Content chunks keep **XChaCha20-Poly1305** (24-byte random nonce per chunk), unchanged except that the key is now the per-archive CEK.
 
+The HPKE helper module MUST include a test that passes the **RFC 9180 Appendix A** known-answer test vectors for the chosen suite, so any dependency swap or misuse is caught before it can produce unreadable archives.
+
 ## 6. Per-archive content encryption
 
-1. `wrap` generates a random 32-byte **CEK** (`OsRng`).
-2. Each chunk is encrypted `XChaCha20Poly1305(CEK, nonce24_random, chunk, aad)`; on-disk chunk stays `[nonce:24][ciphertext:N]` (unchanged layout).
-3. AAD binding for each chunk is unchanged (`generate_aad(version, profile, device_id, started_at)`); it continues to bind ciphertext to manifest identity fields.
+1. `wrap` generates a random 32-byte **CEK**. In production the CEK, all chunk nonces, and every HPKE ephemeral draw from `OsRng`. **Seed mode** (`--seed`, test-only) routes one seeded CSPRNG into all three so a seeded wrap is byte-for-byte deterministic (§6.1) — this is what keeps `--seed`, acceptance tests, and golden vectors reproducible after per-archive randomness is introduced (**M2**).
+2. Each chunk is encrypted `XChaCha20Poly1305(CEK, nonce24, chunk, aad)`; on-disk chunk stays `[nonce:24][ciphertext:N]` (unchanged layout).
+3. **Chunk AAD is upgraded to bind the full identity (M1).** This is the one format break we get, so we stop binding ciphertext to the 48-bit truncated `device_id`. The new AAD is:
+   ```
+   aad = BLAKE3("sealedge/aad/v1" || device.public_key || profile || started_at)
+   ```
+   `device.public_key` is the full Ed25519 identity key, permanently closing the truncation gap. The HPKE `info` field (§7) uses the same full key for the same reason. The legacy `generate_aad(version, profile, device_id, started_at)` is removed from the archive path.
 4. Continuity chain is computed over the ciphertext (`segment_hash(nonce||ciphertext)`) exactly as today (C2 verifier is unaffected).
 5. `derive_chunk_key(device_secret)` is **removed** from the archive path. The signing secret never touches content encryption.
+6. The CEK is **zeroized** immediately after chunk encryption completes in `wrap`, and immediately after chunk decryption completes in `unwrap`.
+
+### 6.1 Seed mode determinism (M2)
+
+`--seed` is **test-only** (never production). In seed mode a single seeded CSPRNG is threaded into (a) CEK generation, (b) per-chunk nonce generation (as today via `generate_seeded_nonce24`), and (c) the RNG passed to HPKE `Seal` (the `hpke` crate takes `&mut impl CryptoRng + RngCore`, so the ephemeral is seeded too). Identical inputs + identical seed ⇒ identical archive bytes, so golden vectors and acceptance snapshots stay stable. Production wraps ignore `--seed` and draw from `OsRng`; the doc/CLI must state plainly that seed mode is not for real archives.
 
 ## 7. Recipient wrapping (HPKE)
 
@@ -116,7 +127,7 @@ For each recipient public key `R_i` (X25519):
 (enc_i, ct_i) = HPKE.Seal(
     mode        = base,
     pkR         = R_i,
-    info        = "sealedge/cek-wrap/v1" || device.id || trst_version,
+    info        = "sealedge/cek-wrap/v1" || device.public_key || trst_version,   // full Ed25519 key, not the 48-bit device.id (M1)
     aad         = BLAKE3(canonical_manifest_without_encryption_block),
     plaintext   = CEK (32 bytes)
 )
@@ -167,6 +178,13 @@ New/changed fields (JSON shown pretty; canonical form is compact and field-order
 }
 ```
 
+**Sign-only mode (OQ2).** `encryption` MAY be `null` to denote an explicit
+*signed-but-unencrypted* archive (plaintext chunks, still signed + continuity-chained).
+This is distinct from — and unambiguous against — an encrypted archive with an empty
+recipient list, which is **forbidden** (an empty `recipients` array is a hard error,
+never "intended unreadable"). Chunks in sign-only mode are stored as plaintext with
+no CEK; `unwrap` on a sign-only archive simply returns the chunk bytes.
+
 ### 8.1 Canonicalization & signature coverage
 
 - `TrstManifest::serialize_canonical` (the C1 hand-ordered serializer in `crates/seal-protocols/src/archive/manifest.rs`) is extended to emit `device.key_agreement_public` (after `public_key`) and the whole `encryption` block (after `claims`, before `prev_archive_hash`) in a fixed field order. Recipients are serialized in array order; `wrap` MUST emit them in a deterministic order (recipient #0 = device, then as supplied).
@@ -196,8 +214,26 @@ New/changed fields (JSON shown pretty; canonical form is compact and field-order
 
 - `wrap` emits `trst_version` `0.2.0` exclusively.
 - `verify`/`unwrap` accept `0.2.0`. A `0.1.0` manifest is rejected with a clear, actionable error: `unsupported legacy archive format 0.1.0 (pre-C4); re-wrap with sealedge >= <ver>`. No silent behavior.
-- Rationale: crates are unpublished / path-only and pre-1.0 (see memory: sealedge crates not published), so a flag-day is acceptable and avoids carrying the insecure master-key decryption path.
-- `derive_chunk_key` and the static-static envelope ECDH are removed from the archive path. `envelope.rs`/`hybrid.rs` (the unused RSA `seal_for_recipient`) are evaluated for deletion in the implementation PR (§13).
+- Rationale: the workspace crates set `publish = false` and depend on each other via path-only deps, and the project is pre-1.0, so a flag-day is acceptable and avoids carrying the insecure master-key decryption path.
+- `derive_chunk_key` and the static-static envelope ECDH are removed from the archive path. `envelope.rs`/`hybrid.rs` (the unused RSA `seal_for_recipient`) are **deleted from the public API in a dedicated PR** (§13, M5).
+
+### 10.1 Version dispatch — check `trst_version` *before* signature (M3)
+
+Every verifier (CLI `seal verify`/`unwrap`, platform `/v1/verify`, WASM) MUST
+read `trst_version` **first** and reject anything outside the supported set with
+an explicit version error, **in both directions**:
+
+- `0.1.0` → new verifier: explicit "legacy format" rejection (above).
+- `0.2.0` → old verifier: serde silently ignores the unknown `encryption` block,
+  then canonicalizes *without* it and reports a **misleading signature failure**.
+  A version gate turns that into an honest "unsupported archive version 0.2.0;
+  upgrade the verifier" error.
+
+Because the canonical bytes (and therefore the signature) differ across versions,
+version dispatch must precede signature verification — never let an unknown
+version reach the signature check. **Deploy ordering (see §13 step 4):** platform
+verifiers must be upgraded to understand `0.2.0` *before* any client starts
+emitting `0.2.0`, or submissions fail with confusing signature errors.
 
 ## 11. Security properties & residual risk
 
@@ -220,18 +256,26 @@ Sketch only; manifest reserves room:
 - **Revocation:** platform maintains a device-key registry (extends the C3 registry) with a `revoked_at` / `min_epoch`; `/v1/verify` can annotate or fail closed on revoked/old-epoch keys.
 - **Rotation:** `seal rekey` issues a new X25519 key, publishes it, and (optionally) re-wraps live archives. Compromise-evidence = signed revocation entries in the registry / a published revocation list.
 
+**Receipts and re-wrapping (M4).** The `encryption` block is signed, so *any*
+manifest change — including a Phase-2 `add-recipient` or a rotation re-wrap —
+produces a new signature and a new `manifest_digest`. C3 receipts bind to that
+digest, so re-wrapping is **re-signing**: previously issued receipts are orphaned
+(they attest the prior manifest), not transferred. Re-wrap is a new artifact, not
+an in-place edit; consumers must re-verify to obtain a fresh receipt.
+
 ## 13. Implementation plan (post-approval PRs)
 
-1. **seal-protocols:** `0.2.0` manifest types (`key_agreement_public`, `encryption` block), extend `serialize_canonical`, unit tests. (No crypto yet.)
-2. **core:** independent X25519 keygen; `SEALEDGE-KEY-V2` bundle; HPKE wrap/unwrap helpers (`hpke` crate); remove `derive_chunk_key` from archive path; unit + KAT tests.
-3. **seal-cli:** `keygen` (dual key + V2), `wrap --recipient`, `unwrap --key` (recipient), legacy-reject; acceptance tests + golden vectors.
-4. **platform + wasm:** parse `encryption` block into canonical bytes (verify unaffected); regenerate C1/C2 golden vectors; confirm no decryption capability added.
-5. **docs:** update `format.md`, `threat-model.md`, `CLAUDE.md` examples; changelog.
+1. **seal-protocols:** `0.2.0` manifest types (`key_agreement_public`, `encryption` block incl. sign-only `null`), extend `serialize_canonical`, unit tests. (No crypto yet.) *Gates on golden vectors alone.*
+2. **core:** independent X25519 keygen; `SEALEDGE-KEY-V2` bundle; HPKE wrap/unwrap helpers (`hpke` crate) with **RFC 9180 Appendix-A KAT tests**; new full-identity chunk AAD (M1); CEK zeroization (§6.6); remove `derive_chunk_key` from archive path; unit + KAT tests. *Gates on golden vectors alone.*
+3. **seal-cli:** `keygen` (dual key + V2), `wrap --recipient` + sign-only mode, `unwrap --key` (recipient), seed-mode determinism (M2), legacy-reject + version dispatch (M3); acceptance tests + golden vectors. *This is where M2 and M3 are exercised end-to-end.*
+4. **platform + wasm:** version dispatch before signature (M3); parse `encryption` block into canonical bytes (verify unaffected); regenerate C1/C2 golden vectors; confirm no decryption capability added. **Deploy note:** upgrade platform verifiers to accept `0.2.0` *before* any client emits `0.2.0` (§10.1), else submissions fail with confusing signature errors.
+5. **cleanup (dedicated PR, M5):** delete `envelope.rs` and `hybrid.rs` from the public API (both have no consumer beyond the `lib.rs` re-export) once step 2 no longer needs them. Kept out of the format PRs to keep diffs reviewable.
+6. **docs:** update `format.md`, `threat-model.md`, `CLAUDE.md` examples; changelog.
 
 Each PR keeps `./scripts/ci-check.sh` green (fmt, clippy `-D warnings`, workspace tests, WASM build).
 
-## 14. Open questions
+## 14. Resolved decisions (were open questions)
 
-- OQ1 — Do we want `seal add-recipient` (re-seal CEK only) in the first implementation, or defer to Phase 2? (Leaning defer.)
-- OQ2 — Should `verify`-only consumers reject archives with **zero** recipients (encryption present but unreadable by anyone), or allow "sign-only, unencrypted" archives as a distinct mode? (Recommend an explicit `encryption: null` sign-only mode rather than an empty recipient list.)
-- OQ3 — Exact `hpke` crate version/features to pin (confirm audit status at implementation time).
+- **OQ1 — `seal add-recipient` now?** **Deferred to Phase 2.** It interacts with re-signing / receipt invalidation (M4) and is cleaner to design alongside rotation.
+- **OQ2 — zero recipients?** **Explicit `encryption: null` sign-only mode** (§8). An empty `recipients` array is a hard error — it is ambiguous between "mistake" and "intentionally unreadable".
+- **OQ3 — `hpke` crate pin.** The `hpke` crate supports the chosen suite (DHKEM-X25519 / HKDF-SHA256 / ChaCha20Poly1305) and is `no_std`-friendly for the WASM story. Pin the newest release at implementation time, record the exact version here and in `Cargo.toml`, and let `cargo audit` (existing CI posture) gate it.
