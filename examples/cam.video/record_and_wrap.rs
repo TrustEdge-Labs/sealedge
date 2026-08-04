@@ -117,6 +117,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             model: "TrustEdgeRefCam".to_string(),
             firmware_version: "1.0.0".to_string(),
             public_key: device_keypair.public.clone(),
+            key_agreement_public: None,
         },
         metadata: ProfileMetadata::CamVideo(CamVideoMetadata {
             started_at,
@@ -132,6 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         segments,
         claims: vec!["location:example".to_string()],
+        encryption: None,
         prev_archive_hash: None,
         signature: None,
     };

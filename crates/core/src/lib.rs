@@ -168,8 +168,8 @@ pub use hybrid::{open_envelope, seal_for_recipient, HybridEncryptionError, Symme
 pub use point_attestation::{ArtifactRef, PointAttestation, PointAttestationError};
 pub use sealedge_seal_protocols::archive::manifest::{
     AudioMetadata, CamVideoManifest, CamVideoMetadata, CaptureInfo, ChunkInfo, DeviceInfo,
-    GenericMetadata, LogMetadata, ManifestFormatError, ProfileMetadata, SegmentInfo,
-    SensorMetadata, TrstManifest,
+    EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata, ManifestFormatError, ProfileMetadata,
+    RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest,
 };
 pub use transport::{Transport, TransportConfig, TransportFactory};
 

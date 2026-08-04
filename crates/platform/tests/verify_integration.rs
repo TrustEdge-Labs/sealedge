@@ -72,6 +72,7 @@ fn build_real_signed_manifest_with_key(
             model: "TrustEdgeRefCam".to_string(),
             firmware_version: "1.0.0".to_string(),
             public_key: keypair.public.clone(),
+            key_agreement_public: None,
         },
         metadata: ProfileMetadata::Generic(GenericMetadata {
             started_at: "2025-01-15T10:30:00Z".to_string(),
@@ -84,6 +85,7 @@ fn build_real_signed_manifest_with_key(
         },
         segments: seg_infos,
         claims: vec!["location:unknown".to_string()],
+        encryption: None,
         prev_archive_hash: None,
         signature: None,
     };

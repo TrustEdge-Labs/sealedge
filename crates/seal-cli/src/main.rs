@@ -713,6 +713,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
                         model: "TrustEdgeRefCam".to_string(),
                         firmware_version: "1.0.0".to_string(),
                         public_key: pub_key.clone(),
+                        key_agreement_public: None,
                     },
                     metadata: metadata.clone(),
                     chunk: ChunkInfo {
@@ -721,6 +722,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
                     },
                     segments: segments.clone(),
                     claims: vec!["location:unknown".to_string()],
+                    encryption: None,
                     prev_archive_hash: None,
                     signature: None,
                 };
@@ -771,6 +773,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
                             model: "TrustEdgeRefCam".to_string(),
                             firmware_version: "1.0.0".to_string(),
                             public_key: pub_key_str.clone(),
+                            key_agreement_public: None,
                         },
                         metadata: metadata.clone(),
                         chunk: ChunkInfo {
@@ -779,6 +782,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
                         },
                         segments: segments.clone(),
                         claims: vec!["location:unknown".to_string()],
+                        encryption: None,
                         prev_archive_hash: None,
                         signature: None,
                     };
@@ -826,6 +830,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
             model: "TrustEdgeRefCam".to_string(),
             firmware_version: "1.0.0".to_string(),
             public_key: signing_public_key,
+            key_agreement_public: None,
         },
         metadata,
         chunk: ChunkInfo {
@@ -834,6 +839,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         },
         segments,
         claims: vec!["location:unknown".to_string()],
+        encryption: None,
         prev_archive_hash: None,
         signature: Some(signature.clone()),
     };

@@ -366,6 +366,7 @@ mod tests {
                 model: "m".to_string(),
                 firmware_version: "1.0.0".to_string(),
                 public_key: "ed25519:k".to_string(),
+                key_agreement_public: None,
             },
             metadata: ProfileMetadata::Generic(GenericMetadata {
                 started_at: "t0".to_string(),
@@ -378,6 +379,7 @@ mod tests {
             },
             segments: seg_infos,
             claims: vec![],
+            encryption: None,
             prev_archive_hash: None,
             signature: None,
         };

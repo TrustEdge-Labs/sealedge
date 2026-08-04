@@ -133,7 +133,12 @@ pub struct DeviceInfo {
     pub id: String,
     pub model: String,
     pub firmware_version: String,
+    /// Ed25519 signing/identity key, `ed25519:<base64>` (C3 cross-check applies).
     pub public_key: String,
+    /// X25519 key-agreement key, `x25519:<base64>` (C4, `0.2.0`). Independent of
+    /// `public_key`; absent in `0.1.0` / sign-only construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_agreement_public: Option<String>,
 }
 
 /// Chunk configuration for the archive.
@@ -153,6 +158,47 @@ pub struct SegmentInfo {
     pub continuity_hash: String,
 }
 
+// ─── Content-encryption block (trst_version 0.2.0, C4) ────────────────────────
+
+/// HPKE ciphersuite identifiers (RFC 9180) used to wrap the per-archive CEK.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HpkeSuite {
+    /// KEM identifier, e.g. `"DHKEM(X25519,HKDF-SHA256)"`.
+    pub kem: String,
+    /// KDF identifier, e.g. `"HKDF-SHA256"`.
+    pub kdf: String,
+    /// AEAD identifier, e.g. `"ChaCha20Poly1305"`.
+    pub aead: String,
+}
+
+/// One recipient's wrapped copy of the per-archive Content-Encryption Key (CEK).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecipientEntry {
+    /// Non-authoritative selection hint: `b3:<hex>` over the recipient X25519 key.
+    pub recipient_id: String,
+    /// Recipient X25519 public key, `x25519:<base64>`.
+    pub recipient_pub: String,
+    /// HPKE encapsulated (ephemeral) key, base64.
+    pub enc: String,
+    /// HPKE-sealed CEK (ciphertext||tag), base64.
+    pub wrapped_cek: String,
+}
+
+/// Content-encryption metadata for `trst_version` `0.2.0` archives.
+///
+/// Absent (`TrstManifest.encryption == None`) denotes a signed-but-unencrypted
+/// ("sign-only") archive. When present, `recipients` MUST be non-empty (an empty
+/// list is a hard error, never "intended unreadable").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncryptionBlock {
+    /// Content AEAD for chunk encryption, e.g. `"XChaCha20Poly1305"`.
+    pub content_aead: String,
+    /// HPKE suite used to wrap the CEK to each recipient.
+    pub hpke: HpkeSuite,
+    /// Per-recipient wrapped CEKs (recipient #0 is conventionally the device).
+    pub recipients: Vec<RecipientEntry>,
+}
+
 // ─── Main manifest type ───────────────────────────────────────────────────────
 
 /// Profile-agnostic manifest for a `.trst` archive.
@@ -167,6 +213,10 @@ pub struct TrstManifest {
     pub chunk: ChunkInfo,
     pub segments: Vec<SegmentInfo>,
     pub claims: Vec<String>,
+    /// Content-encryption metadata (C4, `0.2.0`). `None` = signed-but-unencrypted
+    /// ("sign-only"); `Some` carries the per-recipient wrapped CEKs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_archive_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,6 +244,7 @@ impl TrstManifest {
                 model: "TrustEdgeRefCam".to_string(),
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
+                key_agreement_public: None,
             },
             metadata: ProfileMetadata::Generic(GenericMetadata::default()),
             chunk: ChunkInfo {
@@ -202,6 +253,7 @@ impl TrstManifest {
             },
             segments: Vec::new(),
             claims: Vec::new(),
+            encryption: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -217,6 +269,7 @@ impl TrstManifest {
                 model: "TrustEdgeRefCam".to_string(),
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
+                key_agreement_public: None,
             },
             metadata: ProfileMetadata::CamVideo(CamVideoMetadata {
                 started_at: String::new(),
@@ -232,6 +285,7 @@ impl TrstManifest {
             },
             segments: Vec::new(),
             claims: Vec::new(),
+            encryption: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -277,6 +331,14 @@ impl TrstManifest {
             ",\"public_key\":{}",
             serde_json::to_string(&manifest.device.public_key)?
         ));
+        // C4 (0.2.0): device X25519 key-agreement key, emitted only when present so
+        // 0.1.0 / sign-only manifests canonicalize byte-identically to before.
+        if let Some(ref ka) = manifest.device.key_agreement_public {
+            result.push_str(&format!(
+                ",\"key_agreement_public\":{}",
+                serde_json::to_string(ka)?
+            ));
+        }
         result.push('}');
 
         // Metadata — dispatch on variant
@@ -477,6 +539,54 @@ impl TrstManifest {
             serde_json::to_string(&manifest.claims)?
         ));
 
+        // C4 (0.2.0): content-encryption block, emitted only when present. Fixed
+        // field order; recipients serialized in array order (wrap emits a
+        // deterministic order). Absent ⇒ signed-but-unencrypted, bytes unchanged.
+        if let Some(ref enc) = manifest.encryption {
+            result.push_str(",\"encryption\":{");
+            result.push_str(&format!(
+                "\"content_aead\":{}",
+                serde_json::to_string(&enc.content_aead)?
+            ));
+            result.push_str(",\"hpke\":{");
+            result.push_str(&format!(
+                "\"kem\":{}",
+                serde_json::to_string(&enc.hpke.kem)?
+            ));
+            result.push_str(&format!(
+                ",\"kdf\":{}",
+                serde_json::to_string(&enc.hpke.kdf)?
+            ));
+            result.push_str(&format!(
+                ",\"aead\":{}",
+                serde_json::to_string(&enc.hpke.aead)?
+            ));
+            result.push('}');
+            result.push_str(",\"recipients\":[");
+            for (i, r) in enc.recipients.iter().enumerate() {
+                if i > 0 {
+                    result.push(',');
+                }
+                result.push('{');
+                result.push_str(&format!(
+                    "\"recipient_id\":{}",
+                    serde_json::to_string(&r.recipient_id)?
+                ));
+                result.push_str(&format!(
+                    ",\"recipient_pub\":{}",
+                    serde_json::to_string(&r.recipient_pub)?
+                ));
+                result.push_str(&format!(",\"enc\":{}", serde_json::to_string(&r.enc)?));
+                result.push_str(&format!(
+                    ",\"wrapped_cek\":{}",
+                    serde_json::to_string(&r.wrapped_cek)?
+                ));
+                result.push('}');
+            }
+            result.push(']');
+            result.push('}');
+        }
+
         // Optional prev_archive_hash
         if let Some(ref prev_hash) = manifest.prev_archive_hash {
             result.push_str(&format!(
@@ -501,6 +611,7 @@ impl TrstManifest {
                 model: "TrustEdgeRefSensor".to_string(),
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
+                key_agreement_public: None,
             },
             metadata: ProfileMetadata::Sensor(SensorMetadata {
                 started_at: String::new(),
@@ -519,6 +630,7 @@ impl TrstManifest {
             },
             segments: Vec::new(),
             claims: Vec::new(),
+            encryption: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -534,6 +646,7 @@ impl TrstManifest {
                 model: "TrustEdgeRefAudio".to_string(),
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
+                key_agreement_public: None,
             },
             metadata: ProfileMetadata::Audio(AudioMetadata {
                 started_at: String::new(),
@@ -549,6 +662,7 @@ impl TrstManifest {
             },
             segments: Vec::new(),
             claims: Vec::new(),
+            encryption: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -564,6 +678,7 @@ impl TrstManifest {
                 model: "TrustEdgeRefLog".to_string(),
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
+                key_agreement_public: None,
             },
             metadata: ProfileMetadata::Log(LogMetadata {
                 started_at: String::new(),
@@ -579,6 +694,7 @@ impl TrstManifest {
             },
             segments: Vec::new(),
             claims: Vec::new(),
+            encryption: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -1412,5 +1528,124 @@ mod tests {
         let canonical_bytes = manifest.to_canonical_bytes().unwrap();
         let json_str = String::from_utf8(canonical_bytes).unwrap();
         assert!(json_str.contains("29.97"));
+    }
+
+    // ── C4 (0.2.0) content-encryption block ──
+
+    fn encryption_block() -> EncryptionBlock {
+        EncryptionBlock {
+            content_aead: "XChaCha20Poly1305".to_string(),
+            hpke: HpkeSuite {
+                kem: "DHKEM(X25519,HKDF-SHA256)".to_string(),
+                kdf: "HKDF-SHA256".to_string(),
+                aead: "ChaCha20Poly1305".to_string(),
+            },
+            recipients: vec![
+                RecipientEntry {
+                    recipient_id: "b3:aaaa".to_string(),
+                    recipient_pub: "x25519:AAAA".to_string(),
+                    enc: "ZW5jMA==".to_string(),
+                    wrapped_cek: "d3JhcDA=".to_string(),
+                },
+                RecipientEntry {
+                    recipient_id: "b3:bbbb".to_string(),
+                    recipient_pub: "x25519:BBBB".to_string(),
+                    enc: "ZW5jMQ==".to_string(),
+                    wrapped_cek: "d3JhcDE=".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_absent_encryption_bytes_unchanged() {
+        // A default (0.1.0-shaped) manifest must canonicalize with NO new fields —
+        // this is what keeps the C1/C2 golden vectors valid after the type change.
+        let m = generic_manifest();
+        let json = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+        assert!(!json.contains("encryption"));
+        assert!(!json.contains("key_agreement_public"));
+    }
+
+    #[test]
+    fn test_sign_only_serializes_without_encryption_key() {
+        // encryption: None (sign-only) must not emit an "encryption" key at all
+        // (distinct from an encrypted archive with an empty recipient list).
+        let m = generic_manifest();
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("\"encryption\""));
+        let round: TrstManifest = serde_json::from_str(&json).unwrap();
+        assert!(round.encryption.is_none());
+    }
+
+    #[test]
+    fn test_encryption_canonical_field_order() {
+        let mut m = generic_manifest();
+        m.device.key_agreement_public = Some("x25519:DEVKA".to_string());
+        m.encryption = Some(encryption_block());
+
+        let json = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+
+        // key_agreement_public comes right after public_key, inside device.
+        let pub_pos = json.find("\"public_key\"").unwrap();
+        let ka_pos = json.find("\"key_agreement_public\"").unwrap();
+        let meta_pos = json.find("\"metadata\"").unwrap();
+        assert!(pub_pos < ka_pos && ka_pos < meta_pos);
+
+        // encryption block comes after claims (and before prev_archive_hash, absent here).
+        let claims_pos = json.find("\"claims\"").unwrap();
+        let enc_pos = json.find("\"encryption\"").unwrap();
+        assert!(claims_pos < enc_pos);
+
+        // hpke sub-order kem < kdf < aead.
+        let kem = json.find("\"kem\"").unwrap();
+        let kdf = json.find("\"kdf\"").unwrap();
+        let aead = json.find("\"aead\"").unwrap();
+        assert!(kem < kdf && kdf < aead);
+
+        // Recipients preserve array order (recipient 0 before recipient 1).
+        let r0 = json.find("b3:aaaa").unwrap();
+        let r1 = json.find("b3:bbbb").unwrap();
+        assert!(r0 < r1, "recipients must serialize in array order");
+
+        // Per-recipient field order.
+        let rid = json.find("\"recipient_id\"").unwrap();
+        let rpub = json.find("\"recipient_pub\"").unwrap();
+        let renc = json.find("\"enc\"").unwrap();
+        let rwrap = json.find("\"wrapped_cek\"").unwrap();
+        assert!(rid < rpub && rpub < renc && renc < rwrap);
+    }
+
+    #[test]
+    fn test_encryption_stable_and_signature_excluded() {
+        let mut m = generic_manifest();
+        m.device.key_agreement_public = Some("x25519:DEVKA".to_string());
+        m.encryption = Some(encryption_block());
+
+        let b1 = m.to_canonical_bytes().unwrap();
+        m.set_signature("ed25519:whatever".to_string());
+        let b2 = m.to_canonical_bytes().unwrap();
+        assert_eq!(
+            b1, b2,
+            "signature must remain excluded from canonical bytes"
+        );
+    }
+
+    #[test]
+    fn test_encryption_round_trip() {
+        let mut m = generic_manifest();
+        m.device.key_agreement_public = Some("x25519:DEVKA".to_string());
+        m.encryption = Some(encryption_block());
+
+        let json = serde_json::to_string(&m).unwrap();
+        let round: TrstManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            round.device.key_agreement_public.as_deref(),
+            Some("x25519:DEVKA")
+        );
+        let enc = round.encryption.expect("encryption present");
+        assert_eq!(enc.content_aead, "XChaCha20Poly1305");
+        assert_eq!(enc.recipients.len(), 2);
+        assert_eq!(enc.recipients[1].recipient_id, "b3:bbbb");
     }
 }

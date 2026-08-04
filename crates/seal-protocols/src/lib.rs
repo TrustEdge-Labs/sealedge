@@ -40,8 +40,8 @@ pub mod capture;
 // Re-export all manifest types at crate root for convenience
 pub use archive::manifest::{
     AudioMetadata, CamVideoManifest, CamVideoMetadata, CaptureInfo, ChunkInfo, DeviceInfo,
-    GenericMetadata, LogMetadata, ManifestFormatError, ProfileMetadata, SegmentInfo,
-    SensorMetadata, TrstManifest,
+    EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata, ManifestFormatError, ProfileMetadata,
+    RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest,
 };
 
 // Backward compatibility alias for trst-wasm (temporary)
