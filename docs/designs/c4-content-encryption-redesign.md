@@ -89,7 +89,7 @@ A recipient is identified by its X25519 public key. For convenience the manifest
 
 ## 5. HPKE ciphersuite
 
-Per RFC 9180, using the [`hpke`](https://crates.io/crates/hpke) crate (pure-Rust, `no_std`-capable, WASM-friendly; pin the latest audited release at implementation time and record the exact version in `Cargo.toml` + this doc):
+Per RFC 9180, using the [`hpke`](https://crates.io/crates/hpke) crate (pure-Rust, `no_std`-capable, WASM-friendly). **Pinned to `hpke = 0.12`** (see the OQ3 note in §14 for why this deviates from "newest"):
 
 | HPKE component | Choice | Rationale |
 |---|---|---|
@@ -278,4 +278,4 @@ Each PR keeps `./scripts/ci-check.sh` green (fmt, clippy `-D warnings`, workspac
 
 - **OQ1 — `seal add-recipient` now?** **Deferred to Phase 2.** It interacts with re-signing / receipt invalidation (M4) and is cleaner to design alongside rotation.
 - **OQ2 — zero recipients?** **Explicit `encryption: null` sign-only mode** (§8). An empty `recipients` array is a hard error — it is ambiguous between "mistake" and "intentionally unreadable".
-- **OQ3 — `hpke` crate pin.** The `hpke` crate supports the chosen suite (DHKEM-X25519 / HKDF-SHA256 / ChaCha20Poly1305) and is `no_std`-friendly for the WASM story. Pin the newest release at implementation time, record the exact version here and in `Cargo.toml`, and let `cargo audit` (existing CI posture) gate it.
+- **OQ3 — `hpke` crate pin.** RESOLVED during Phase 2: pin **`hpke = 0.12`** (default-features off, `features = ["alloc", "x25519"]`), NOT the newest 0.14. Rationale: hpke 0.14 rests on the RustCrypto 0.11 generation (rand_core 0.10, x25519-dalek 3.0, aes-gcm 0.11, chacha 0.11, sha2 0.11) and would pull a *second, duplicate* generation of crypto crates alongside the workspace's pinned 0.10-era (aes-gcm 0.10.3, chacha 0.10.1, sha2 0.10.9, hkdf 0.12.4, x25519-dalek 2.0.1, rand_core 0.6). hpke 0.12's deps match the workspace exactly — no duplication, same audited rust-hpke crate. `cargo audit` still gates it; revisit 0.14 if/when the workspace bumps its RustCrypto generation wholesale. (User-approved deviation, 2026-08.)

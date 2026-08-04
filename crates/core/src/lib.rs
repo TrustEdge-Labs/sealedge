@@ -102,6 +102,7 @@ pub mod envelope;
 pub mod error;
 pub mod format;
 pub mod hybrid;
+pub mod keywrap;
 pub mod point_attestation;
 pub mod secret;
 pub mod transport;
@@ -165,6 +166,11 @@ pub use error::ManifestError; // ManifestError is re-exported from error.rs (whi
 pub use error::{BackendError, TransportError, TrustEdgeError};
 pub use format::*;
 pub use hybrid::{open_envelope, seal_for_recipient, HybridEncryptionError, SymmetricKey};
+pub use keywrap::{
+    cek_wrap_info, chunk_aad_v2, hpke_open_cek, hpke_seal_cek, parse_x25519_public, recipient_id,
+    ContentKey, DeviceBundle, KeyAgreementKeypair, CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID,
+    HPKE_KEM_ID,
+};
 pub use point_attestation::{ArtifactRef, PointAttestation, PointAttestationError};
 pub use sealedge_seal_protocols::archive::manifest::{
     AudioMetadata, CamVideoManifest, CamVideoMetadata, CaptureInfo, ChunkInfo, DeviceInfo,
