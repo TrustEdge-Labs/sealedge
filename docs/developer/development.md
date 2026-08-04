@@ -125,7 +125,7 @@ Tests span 9 workspace crates covering all system components:
 
 **Quality Assurance:**
 ```bash
-# Complete test suite (406 tests)
+# Complete test suite
 ./scripts/ci-check.sh            # CI pipeline validation
 
 # Test by crate

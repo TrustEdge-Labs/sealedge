@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build workspace
 cargo build --workspace --release
 
-# Test entire workspace (471 tests)
+# Test entire workspace
 cargo test --workspace
 
 # Test specific crates
@@ -313,14 +313,14 @@ See `deploy/.env.example` for the full template with all variables documented.
 ./target/release/sealedge-server --listen 127.0.0.1:8080 --require-auth --decrypt
 
 # Terminal 2: Client
-./target/release/sealedge-client --server 127.0.0.1:8080 --input test.txt --enable-auth --server-cert server.cert
+./target/release/sealedge-client --server 127.0.0.1:8080 --file test.txt --enable-auth --server-cert server.cert
 
 # Without authentication (manual key sharing):
 # Terminal 1: Server
 ./target/release/sealedge-server --listen 127.0.0.1:8080 --decrypt --key-hex $(openssl rand -hex 32)
 
 # Terminal 2: Client
-./target/release/sealedge-client --server 127.0.0.1:8080 --input test.txt --key-hex $(cat shared.key)
+./target/release/sealedge-client --server 127.0.0.1:8080 --file test.txt --key-hex $(cat shared.key)
 ```
 
 ### Debugging

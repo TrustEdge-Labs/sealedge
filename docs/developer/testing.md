@@ -6,7 +6,7 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 -->
 # Sealedge Testing Guide
 
-Comprehensive testing, validation, and verification procedures for Sealedge with **406 total tests** covering all components.
+Comprehensive testing, validation, and verification procedures for Sealedge covering all components.
 
 ## Table of Contents
 - [Test Architecture](#test-architecture)

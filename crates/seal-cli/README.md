@@ -88,6 +88,23 @@ Key flags (see `seal <command> --help` for the full list):
 - `attest-sbom --binary <f> --sbom <f> --device-key <k> --device-pub <k> [--out <f>] [--unencrypted]`
 - `verify-attestation <file> --device-pub <ed25519:...|.pub> [--binary <f>] [--sbom <f>]`
 
+### Exit codes
+
+`seal verify` returns a distinct exit code per failure class, so scripts can branch on
+the result (also documented in [docs/user/cli.md](../../docs/user/cli.md)):
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Success — signature and continuity both pass |
+| `10` | Signature verification failed |
+| `11` | Continuity / integrity chain verification failed |
+| `12` | Archive read, schema, or IO error (bad archive, missing chunk, unsupported `trst_version`) |
+| `14` | Internal canonicalization error |
+| `1`  | Other error |
+
+`verify-attestation` uses `0` (verified), `10` (signature or file-hash mismatch), and
+`1` (other errors).
+
 ---
 
 ## Examples
