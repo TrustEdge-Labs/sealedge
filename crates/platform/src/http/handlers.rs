@@ -364,6 +364,48 @@ pub async fn verify_handler(
         // No tenant context (tenant-agnostic mode): cannot bind, stays unregistered.
     }
 
+    // H1 Phase 2: registry revocation enforcement (design §5.2). Look up the
+    // signing key's revocation state (A2, org-agnostic registry binding) and fail
+    // closed when the archive's key_epoch is below the device's min_epoch floor.
+    // `revoked_at` itself is NOT a hard reject here — trusting an archive under a
+    // revoked key is the verifier-side composition with the witness `observed_at`
+    // (§5.3); we annotate `revoked_at`/`min_epoch` so the client can perform it.
+    let mut revocation_annotation = serde_json::Value::Null;
+    if let Some((_, rev)) =
+        crate::database::get_device_revocation_by_pub(&state.db_pool, &request.device_pub)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ValidationError::new(
+                        "database_error",
+                        "Failed to query device revocation",
+                    )),
+                )
+            })?
+    {
+        // manifest is raw JSON here; absent key_epoch means epoch 0 (genesis).
+        let archive_epoch = request
+            .manifest
+            .get("device")
+            .and_then(|d| d.get("key_epoch"))
+            .and_then(|e| e.as_u64())
+            .unwrap_or(0) as u32;
+        if !crate::revocation::epoch_allowed(rev.min_epoch, archive_epoch) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ValidationError::new(
+                    "epoch_below_min",
+                    "archive key_epoch is below the device's min_epoch floor",
+                )),
+            ));
+        }
+        revocation_annotation = serde_json::json!({
+            "revoked_at": rev.revoked_at,
+            "min_epoch": rev.min_epoch,
+        });
+    }
+
     // Inline verification — direct call, no HTTP forwarding
     let report = match verify_to_report(&request.manifest, &request.segments, &request.device_pub) {
         Ok(report) => report,
@@ -396,7 +438,9 @@ pub async fn verify_handler(
             "verified_segments": report.metadata.verified_segments,
             "chain_tip": report.metadata.chain_tip,
             "genesis_hash": report.metadata.genesis_hash,
-        }
+        },
+        // H1 Phase 2: revocation annotation (null when the key is unregistered).
+        "revocation": revocation_annotation,
     });
 
     let org_id_for_db = org_ctx
@@ -527,6 +571,97 @@ pub async fn register_device_handler(
     }))
 }
 
+/// Body of a revoke request (H1 Phase 2). Both fields optional: an empty body
+/// revokes as of now with no epoch floor.
+#[cfg(feature = "postgres")]
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct RevokeRequest {
+    /// RFC 3339 instant the key is considered revoked from (defaults to now).
+    pub revoked_at: Option<String>,
+    /// Reject archives whose `key_epoch` is below this.
+    pub min_epoch: Option<u32>,
+}
+
+/// Response to a revoke request: the applied (post-monotonicity) state.
+#[cfg(feature = "postgres")]
+#[derive(Debug, serde::Serialize)]
+pub struct RevokeResponse {
+    pub id: uuid::Uuid,
+    pub revoked_at: String,
+    pub min_epoch: Option<u32>,
+}
+
+/// POST /v1/devices/:id/revoke — revoke a device's signing key (H1 Phase 2,
+/// design §5). Org-scoped (bearer-authenticated); only the owning org may revoke
+/// its device. **Monotonic-only** (PA4): `revoked_at` may be moved earlier but
+/// never later or cleared, and `min_epoch` is non-decreasing — a violation is a
+/// `409`, so an admin cannot launder a post-compromise forgery.
+#[cfg(feature = "postgres")]
+pub async fn revoke_device_handler(
+    State(state): State<AppState>,
+    axum::extract::Extension(org_ctx): axum::extract::Extension<crate::http::auth::OrgContext>,
+    axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+    Json(req): Json<RevokeRequest>,
+) -> Result<Json<RevokeResponse>, (StatusCode, String)> {
+    // Tenant-scoped load: an org sees (and revokes) only its own device.
+    let (_device_pub, current) =
+        crate::database::get_device_revocation(&state.db_pool, org_ctx.org_id, id)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "device lookup failed".to_string(),
+                )
+            })?
+            .ok_or((
+                StatusCode::NOT_FOUND,
+                "no such device in this organization".to_string(),
+            ))?;
+
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (revoked_at, min_epoch) = match crate::revocation::decide_revoke(
+        &current,
+        req.revoked_at.as_deref(),
+        req.min_epoch,
+        &now,
+    ) {
+        crate::revocation::RevokeOutcome::Reject(msg) => {
+            return Err((StatusCode::CONFLICT, msg));
+        }
+        crate::revocation::RevokeOutcome::Apply {
+            revoked_at,
+            min_epoch,
+        } => (revoked_at, min_epoch),
+    };
+
+    let updated = crate::database::set_device_revocation(
+        &state.db_pool,
+        org_ctx.org_id,
+        id,
+        &revoked_at,
+        min_epoch,
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "revoke update failed".to_string(),
+        )
+    })?;
+    if !updated {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no such device in this organization".to_string(),
+        ));
+    }
+
+    Ok(Json(RevokeResponse {
+        id,
+        revoked_at,
+        min_epoch,
+    }))
+}
+
 /// Witness response: the signed JWS witness receipt.
 #[cfg(feature = "postgres")]
 #[derive(serde::Serialize)]
@@ -554,16 +689,30 @@ pub async fn witness_handler(
         ));
     }
 
-    // 2. Registry binding by public key (A2) — honest-public-witness otherwise.
-    let device_registered = crate::database::get_device_by_pub(&state.db_pool, &req.device_pub)
+    // 2. Registry binding + revocation state by public key (A2). An unregistered
+    // key is honest-public-witnessed and is never considered revoked.
+    let (device_registered, revocation) =
+        match crate::database::get_device_revocation_by_pub(&state.db_pool, &req.device_pub)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "registry lookup failed".to_string(),
+                )
+            })? {
+            Some((_, state)) => (true, state),
+            None => (false, crate::revocation::RevocationState::default()),
+        };
+
+    // PA2: has this key been rotated away (superseded), and at what sequence?
+    let superseded_seq = crate::database::lineage_rotation_seq(&state.db_pool, &req.device_pub)
         .await
         .map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "registry lookup failed".to_string(),
+                "lineage lookup failed".to_string(),
             )
-        })?
-        .is_some();
+        })?;
 
     // 3. Load the device's ledger and decide (pure, unit-tested logic).
     let existing = crate::database::witness_entries(&state.db_pool, &req.device_pub)
@@ -575,8 +724,34 @@ pub async fn witness_handler(
             )
         })?;
 
+    let decision = crate::witness::decide(&existing, req.sequence, &req.tip);
+
+    // PA5: a revoked device is refused a NEW witness (already-witnessed entries
+    // still replay below). The gate is on device state, not tip time.
+    if crate::revocation::refuse_revoked_witness(
+        crate::revocation::is_revoked(&revocation),
+        &decision,
+    ) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "device key is revoked; new chronicle tips are refused".to_string(),
+        ));
+    }
+
+    // PA2: the superseded old key's ledger is closed beyond the rotation point —
+    // a stolen old key cannot fork a second platform-co-signed timeline.
+    if crate::revocation::refuse_superseded(superseded_seq, req.sequence, &decision) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "superseded: this key rotated away at sequence {}; new tips beyond it are refused",
+                superseded_seq.unwrap_or_default()
+            ),
+        ));
+    }
+
     let observed_now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let (observed_at, prev) = match crate::witness::decide(&existing, req.sequence, &req.tip) {
+    let (observed_at, prev) = match decision {
         crate::witness::WitnessDecision::Fork { existing_tip } => {
             return Err((
                 StatusCode::CONFLICT,
@@ -619,6 +794,69 @@ pub async fn witness_handler(
             (observed_now, prev)
         }
     };
+
+    // PA1: if this witnesses a rotation tip, verify the rotation entry's
+    // co-signatures + binding, then record device lineage (old -> new). The
+    // insert is idempotent, so a replayed rotation witness is harmless.
+    if let Some(rec) = req.rotation.as_ref() {
+        match crate::revocation::verify_lineage_rotation(
+            rec,
+            &req.device_pub,
+            req.sequence,
+            &req.tip,
+        ) {
+            crate::revocation::LineageCheck::Reject(msg) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("rotation lineage rejected: {msg}"),
+                ));
+            }
+            crate::revocation::LineageCheck::Ok {
+                old_pub,
+                rotation_seq,
+            } => {
+                // (iv) defense-in-depth: if the old key witnessed its predecessor,
+                // that entry's tip must match the rotation's prev_archive_hash.
+                // Best-effort — witnessing is optional, so a missing predecessor
+                // entry does not block lineage (the i-iii crypto checks stand).
+                if rotation_seq > 0 {
+                    if let Some(prev_entry) = crate::database::witness_entry_at(
+                        &state.db_pool,
+                        &old_pub,
+                        rotation_seq - 1,
+                    )
+                    .await
+                    .map_err(|_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "lineage predecessor lookup failed".to_string(),
+                        )
+                    })? {
+                        if prev_entry.tip != rec.prev_archive_hash {
+                            return Err((
+                                StatusCode::CONFLICT,
+                                "rotation prev_archive_hash does not match the old key's witnessed chain".to_string(),
+                            ));
+                        }
+                    }
+                }
+                crate::database::lineage_insert(
+                    &state.db_pool,
+                    &req.device_pub,
+                    &old_pub,
+                    rotation_seq,
+                    &observed_at,
+                )
+                .await
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "lineage insert failed".to_string(),
+                    )
+                })?;
+            }
+        }
+    }
 
     let receipt = crate::witness::WitnessReceipt::build(
         &req.device_pub,

@@ -310,6 +310,10 @@ struct WitnessCmd {
         help = "Platform /v1/witness endpoint to submit to"
     )]
     post: Option<String>,
+    /// Rotation entry directory to attach when the tip being witnessed is a
+    /// rotation (H1 Phase 2) — lets the platform verify it and record lineage.
+    #[arg(long = "rotation", value_name = "DIR")]
+    rotation: Option<PathBuf>,
     /// Accept a plaintext key bundle without a passphrase (CI/automation only).
     #[arg(long)]
     unencrypted: bool,
@@ -2301,12 +2305,27 @@ async fn handle_witness(args: WitnessCmd) -> Result<()> {
     }
 
     let signed_at = current_timestamp()?;
-    let request = WitnessRequest::create_signed(
+    let mut request = WitnessRequest::create_signed(
         &bundle.signing,
         state.sequence,
         state.tip.clone(),
         signed_at,
     )?;
+
+    // H1 Phase 2: attach the rotation entry when witnessing a rotation tip, so the
+    // platform can verify its co-signatures and record device lineage (PA1).
+    if let Some(rot_dir) = args.rotation.as_deref() {
+        let rec = read_rotation(rot_dir)?;
+        let rot_tip = format_archive_id(&rec.archive_digest());
+        if rot_tip != state.tip {
+            anyhow::bail!(
+                "--rotation entry digest ({rot_tip}) does not match the chronicle tip ({}) — \
+                 attach the rotation you just created with `seal rekey`",
+                state.tip
+            );
+        }
+        request.rotation = Some(rec);
+    }
 
     match args.post.as_deref() {
         Some(url) => {

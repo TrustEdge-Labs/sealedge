@@ -73,7 +73,8 @@ Verifiers only need public keys and reject any archive whose `trst_version` is n
 | `keygen` | Generate a `SEALEDGE-KEY-V2` bundle and its `.pub` file |
 | `wrap` | Create a signed (and by default encrypted) `.seal` archive |
 | `verify` | Verify an archive using public keys only |
-| `verify-chronicle` | Verify a device's cross-archive chronicle (linkage + optional witness) |
+| `verify-chronicle` | Verify a device's cross-archive chronicle (linkage, rotations + optional witness) |
+| `rekey` | Rotate a chronicle to a new signing key (emits a dual-signed rotation entry) |
 | `witness` | Submit the chronicle tip for a signed, timestamped platform witness receipt |
 | `unwrap` | Decrypt and recover the original data (recipient uses its own bundle) |
 | `emit-request` | Build a verification request JSON (optionally POST it to a platform) |
@@ -85,8 +86,9 @@ Key flags (see `seal <command> --help` for the full list):
 - `keygen --out-key <p> --out-pub <p> [--unencrypted]`
 - `wrap --in <f> --out <dir.seal> [--device-key <k>] [--profile generic|cam.video|sensor|audio|log] [--recipient x25519:<b64>]... [--sign-only] [--unencrypted] [--backend software|yubikey] [--chunk-size N] [--seed N] [--chronicle <state>] [--prev-archive <p> | --prev-hash <b3:> --prev-seq <n>]` (plus profile-specific flags). Encrypted to the device key by default; if `--device-key` is omitted a `device.key`/`device.pub` pair is auto-generated. `--backend yubikey` requires `--sign-only`.
 - `verify <archive> --device-pub <ed25519:...> [--json] [--emit-receipt <path>]`
-- `verify-chronicle <paths...> --device-pub <ed25519:...> [--witness <receipt>] [--witness-jwks <url|file>] [--json]`
-- `witness --chronicle <state> --device-key <k> [--post <url>] [--out <f>] [--unencrypted]`
+- `verify-chronicle <paths...> --device-pub <ed25519:...> [--witness <receipt>] [--witness-jwks <url|file>] [--json]` — `--device-pub` pins the **genesis** identity; the walk follows rotation entries and reports the current identity/epoch.
+- `rekey --chronicle <state> --old-key <old bundle> --new-key <new bundle> --out <dir.seal> [--unencrypted]` — the new key must be a pre-generated `seal keygen` bundle.
+- `witness --chronicle <state> --device-key <k> [--rotation <dir>] [--post <url>] [--out <f>] [--unencrypted]` — pass `--rotation` when the tip is a rotation entry so the platform records device lineage.
 - `unwrap <archive> --device-key <recipient bundle> --out <path> [--device-pub <signer pin>] [--unencrypted]`
 - `emit-request --archive <dir> --device-pub <.pub> --out <json> [--post <url>]`
 - `attest-sbom --binary <f> --sbom <f> --device-key <k> --device-pub <k> [--out <f>] [--unencrypted]`

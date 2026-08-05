@@ -112,6 +112,14 @@ pub struct WitnessRequest {
     pub signed_at: String,
     /// Ed25519 signature over [`WitnessRequest::signing_bytes`].
     pub signature: String,
+    /// The rotation entry, present iff this witnesses a *rotation tip* (H1 Phase 2,
+    /// PA1). It lets the platform verify the co-signatures and record device
+    /// lineage. **Not** covered by `signature` — it needs no separate signature
+    /// because it carries its own dual co-signatures AND is bound to the signed
+    /// `tip` (the platform checks `tip == archive_digest(rotation)`), so it cannot
+    /// be swapped without breaking the signed tip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<RotationRecord>,
 }
 
 impl WitnessRequest {
@@ -141,6 +149,7 @@ impl WitnessRequest {
             tip: tip.into(),
             signed_at: signed_at.into(),
             signature: String::new(),
+            rotation: None,
         };
         req.signature = sign_manifest(signing, &req.signing_bytes())?;
         Ok(req)
@@ -393,6 +402,33 @@ mod tests {
         let sa = s.find("signed_at").unwrap();
         assert!(dp < sq && sq < tp && tp < sa, "fixed field order: {s}");
         assert!(!s.contains("signature"), "signature excluded: {s}");
+    }
+
+    #[test]
+    fn witness_rotation_attachment_is_not_signed() {
+        // PA1: attaching a rotation entry must not change the signing bytes or
+        // invalidate the signature — the rotation is bound to the signed tip, not
+        // signed itself.
+        let kp = DeviceKeypair::generate().unwrap();
+        let new = DeviceBundle::generate().unwrap();
+        let mut req = WitnessRequest::create_signed(&kp, 1, "b3:tip", "t").unwrap();
+        let bytes_before = req.signing_bytes();
+        assert!(req.verify());
+
+        let rec =
+            RotationRecord::create_signed(&kp, 0, &new, 1, format!("b3:{}", "0".repeat(64)), "t")
+                .unwrap();
+        req.rotation = Some(rec);
+
+        assert_eq!(
+            req.signing_bytes(),
+            bytes_before,
+            "rotation must not enter the signed bytes"
+        );
+        assert!(
+            req.verify(),
+            "signature still valid after attaching rotation"
+        );
     }
 
     // ── H1 Phase 2: rotation records ──

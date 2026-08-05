@@ -19,6 +19,12 @@ pub mod verify;
 // receipt body. The postgres/HTTP wiring lives in `database` and `http`.
 pub mod witness;
 
+// Device revocation & rotation lineage (H1 Phase 2): pure enforcement decisions
+// (revoke monotonicity, min-epoch gate, revoked/superseded witness refusal,
+// rotation-lineage verification). The postgres/HTTP wiring lives in `database`
+// and `http`.
+pub mod revocation;
+
 // CA module is library-only; not exposed via HTTP routes
 #[cfg(feature = "ca")]
 mod ca;

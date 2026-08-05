@@ -341,6 +341,45 @@ capture timestamps are self-asserted.
   — that needs a Merkle transparency log with gossiped consistency proofs, which
   is explicitly out of scope (see `docs/designs/h1-device-chronicle.md` §9).
 
+### T15: Key Lifecycle — Rotation & Revocation (H1 Phase 2)
+
+**Threat**: A device's signing key is fixed for the life of its chronicle. It
+cannot be rolled without abandoning history, and if it is compromised nothing
+marks it invalid — a verifier can't tell a legitimate pre-compromise archive from
+a post-compromise forgery.
+
+**Mitigations**:
+- **Rotation entry**: a dedicated, dual-signed chronicle entry links a new signing
+  key to the old one. `sig_old` proves the current holder authorized the successor
+  (only it can extend the chain); `sig_new` proves possession of the new key (no
+  committing someone else's key). Every archive carries a monotonic `key_epoch`;
+  `seal verify-chronicle` walks the active identity across rotations, verifying
+  both co-signatures and the exact `+1` epoch bump at each switch.
+- **Registry revocation**: `POST /v1/devices/:id/revoke` (org-admin, tenant-scoped)
+  sets `revoked_at` / `min_epoch` on the device row. Revocation is **monotonic**
+  (`revoked_at` earlier-only and never cleared; `min_epoch` non-decreasing), so an
+  admin cannot retroactively bless a forgery. `/v1/verify` fails closed when an
+  archive's `key_epoch` is below `min_epoch`.
+- **Revocation × witness composition (the teeth)**: a signing key seen after
+  compromise can forge archives with any self-asserted timestamp, so the only
+  trusted time is the witness `observed_at`. An archive under a revoked key is
+  trustworthy iff it was **witnessed before `revoked_at`** — a verifier-side
+  composition of `verify-chronicle --witness` and the registry `revoked_at`.
+- **Superseded-ledger rule**: once the platform records lineage `old → new` at the
+  rotation sequence (after verifying the rotation entry carried on the witness
+  request), the old key's witness ledger is **closed** beyond that point (`409`),
+  so a stolen old key cannot fork a second platform-co-signed timeline. `/v1/witness`
+  also refuses any **new** tip from a revoked key (`403`) while still replaying
+  already-witnessed facts.
+
+**Residual risk**:
+- Archives witnessed **before** the compromise was noticed and revoked are trusted
+  — inherent to "before revocation" and the reason the witnessed timestamp matters.
+- Revocation is a registry fact; a malicious platform lying about `revoked_at` is
+  the same equivocation residual as T14 (needs a transparency log).
+- Device-signed self-revocation is not offered — revocation is registry/org-admin
+  only (see `docs/designs/h1-phase2-rotation-revocation.md` §1 non-goals).
+
 ## RSA Vulnerability History
 
 This section documents the full lifecycle of RUSTSEC-2023-0071 (Marvin Attack) in Sealedge.
@@ -381,6 +420,9 @@ RUSTSEC-2023-0071 was removed from `.cargo/audit.toml`. `cargo-audit` now passes
 | T10: Secret material in memory | MITIGATED | v1.7 |
 | T11: Supply chain vulnerabilities | MITIGATED | v1.3 / v2.2 |
 | T12: YubiKey hardware fallback | MITIGATED | v1.1 |
+| T13: Content confidentiality & recipient access (C4) | MITIGATED | v6.x (C4) |
+| T14: Cross-archive integrity (chronicle + witness, H1) | MITIGATED | v6.x (H1) |
+| T15: Key lifecycle — rotation & revocation (H1 Phase 2) | MITIGATED | v6.x (H1 P2) |
 
 ---
 

@@ -16,6 +16,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — H1 Phase 2: key rotation & revocation
+
+- **Key rotation.** `seal rekey --chronicle <state> --old-key <old> --new-key <new>
+  --out <dir>` emits a dedicated, dual-signed rotation entry (`rotation.json`) that
+  links a new signing identity to the old one and advances the chronicle to the new
+  key/epoch. `sig_old` authorizes the successor; `sig_new` proves possession.
+- **Key epoch.** Every archive carries a monotonic `device.key_epoch` (H1 archives
+  are epoch 0, emitted only when `> 0` so they stay byte-identical). `seal wrap
+  --chronicle` stamps it from the chronicle state.
+- **`verify-chronicle` walks rotations.** The one-signer rule is replaced by an
+  active-identity walk: `--device-pub` pins the genesis identity, each rotation
+  switches the active signer after verifying both co-signatures and the `+1` epoch
+  bump. The `--witness` cross-check binds the receipt to the active signer at the
+  witnessed sequence (works on rotated chains).
+- **Registry revocation.** `POST /v1/devices/:id/revoke` (org-admin, tenant-scoped)
+  sets `revoked_at` / `min_epoch`, **monotonic-only** (earlier-only, never cleared;
+  non-decreasing). `/v1/verify` fails closed below `min_epoch` and annotates the
+  result with the revocation state. Trusting an archive under a revoked key is the
+  verifier-side composition `verify-chronicle --witness` + registry `revoked_at`.
+- **Witness lineage & superseded ledger.** A rotation tip witnessed under the new
+  key (`seal witness --rotation <dir>`) carries the rotation entry; the platform
+  verifies its co-signatures and records `device_lineage`, then closes the old key's
+  ledger beyond the rotation point (`409`) and refuses new tips from a revoked key
+  (`403`, replays still succeed).
+- Threat model **T15** (key lifecycle). Migration `004_revocation.sql`
+  (`devices.revoked_at` / `min_epoch`, `device_lineage`).
+
 ### Added — H1 device chronicle (cross-archive continuity)
 
 - **Chronicle linkage.** `.seal` archives can form a per-device, hash-linked,
@@ -33,8 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local tip against a receipt and detects **tail deletion**. Without the
   `postgres` feature the endpoint returns `503` rather than fake durability.
 - Threat model **T14** (cross-archive integrity). Key rotation / revocation /
-  key-epoch are designed (`docs/designs/h1-device-chronicle.md` §8) for a later
-  phase.
+  key-epoch shipped in **H1 Phase 2** (above).
 
 ### Security (external review — Criticals C1–C4)
 

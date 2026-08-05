@@ -8,8 +8,10 @@ Project: sealedge — Privacy and trust at the edge.
 
 # H1 Phase 2 — Key rotation & revocation ("the device's story over time")
 
-Status: **APPROVED (with amendments PA1–PA5 + nits PN1–PN5, folded in below) —
-P2.1 ready to build.**
+Status: **IMPLEMENTED** (P2.1 + P2.2). Approved with amendments PA1–PA5 + nits
+PN1–PN5, all folded in below and shipped. P2.1 (epoch + rotation + verify-chronicle
+walk) and P2.2 (platform revocation + witness lineage/superseded-ledger) are on
+`main`; the `#[ignore]` DB integration tests require a live PostgreSQL.
 
 Builds on [H1 device chronicle](h1-device-chronicle.md) (§8 sketched this) and
 C4 (§12). H1 gave a device a signed, hash-linked, witnessed chronicle under a

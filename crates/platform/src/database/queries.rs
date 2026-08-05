@@ -203,3 +203,136 @@ pub async fn witness_insert(
     .await?;
     Ok(())
 }
+
+/// A single witnessed ledger entry for a device at an exact sequence, if present.
+pub async fn witness_entry_at(
+    pool: &PgPool,
+    device_pub: &str,
+    sequence: u64,
+) -> Result<Option<crate::witness::WitnessEntry>> {
+    let row = sqlx::query(
+        "SELECT sequence, tip, observed_at FROM witness_log WHERE device_pub = $1 AND sequence = $2",
+    )
+    .bind(device_pub)
+    .bind(sequence as i64)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| {
+        let seq: i64 = r.get("sequence");
+        crate::witness::WitnessEntry {
+            sequence: seq as u64,
+            tip: r.get("tip"),
+            observed_at: r.get("observed_at"),
+        }
+    }))
+}
+
+// ─── H1 Phase 2: revocation & rotation lineage ────────────────────────────────
+
+/// Load a device's revocation state by signing key (A2). Returns `(id, state)`
+/// when the key is registered. Used by `/v1/witness` (revoked gate) and
+/// `/v1/verify` (min_epoch enforcement + annotation).
+pub async fn get_device_revocation_by_pub(
+    pool: &PgPool,
+    device_pub: &str,
+) -> Result<Option<(Uuid, crate::revocation::RevocationState)>> {
+    let row = sqlx::query("SELECT id, revoked_at, min_epoch FROM devices WHERE device_pub = $1")
+        .bind(device_pub)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| {
+        let min_epoch: Option<i32> = r.get("min_epoch");
+        (
+            r.get("id"),
+            crate::revocation::RevocationState {
+                revoked_at: r.get("revoked_at"),
+                min_epoch: min_epoch.map(|e| e as u32),
+            },
+        )
+    }))
+}
+
+/// Load a device's revocation state by (org, device UUID) for the revoke
+/// endpoint — tenant-scoped so an org may only revoke its own device. Returns
+/// `(device_pub, state)`.
+pub async fn get_device_revocation(
+    pool: &PgPool,
+    org_id: Uuid,
+    id: Uuid,
+) -> Result<Option<(String, crate::revocation::RevocationState)>> {
+    let row = sqlx::query(
+        "SELECT device_pub, revoked_at, min_epoch FROM devices WHERE id = $1 AND org_id = $2",
+    )
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| {
+        let min_epoch: Option<i32> = r.get("min_epoch");
+        (
+            r.get("device_pub"),
+            crate::revocation::RevocationState {
+                revoked_at: r.get("revoked_at"),
+                min_epoch: min_epoch.map(|e| e as u32),
+            },
+        )
+    }))
+}
+
+/// Apply revocation columns to a device row (tenant-scoped). Returns whether a
+/// row was updated (false ⇒ no such device in this org). Monotonicity is decided
+/// by `revocation::decide_revoke` before this is called.
+pub async fn set_device_revocation(
+    pool: &PgPool,
+    org_id: Uuid,
+    id: Uuid,
+    revoked_at: &str,
+    min_epoch: Option<u32>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE devices SET revoked_at = $1, min_epoch = $2, status = 'revoked' \
+         WHERE id = $3 AND org_id = $4",
+    )
+    .bind(revoked_at)
+    .bind(min_epoch.map(|e| e as i32))
+    .bind(id)
+    .bind(org_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The sequence at which `old_pub` rotated away, if it has been superseded (PA2).
+pub async fn lineage_rotation_seq(pool: &PgPool, old_pub: &str) -> Result<Option<u64>> {
+    let row = sqlx::query("SELECT rotation_seq FROM device_lineage WHERE old_pub = $1")
+        .bind(old_pub)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| {
+        let seq: i64 = r.get("rotation_seq");
+        seq as u64
+    }))
+}
+
+/// Record a verified rotation lineage `old_pub → new_pub @ rotation_seq` (PA1).
+/// Idempotent on `new_pub` (a new key continues exactly one prior identity), so a
+/// replayed rotation witness does not error.
+pub async fn lineage_insert(
+    pool: &PgPool,
+    new_pub: &str,
+    old_pub: &str,
+    rotation_seq: u64,
+    observed_at: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO device_lineage (new_pub, old_pub, rotation_seq, observed_at) \
+         VALUES ($1, $2, $3, $4) ON CONFLICT (new_pub) DO NOTHING",
+    )
+    .bind(new_pub)
+    .bind(old_pub)
+    .bind(rotation_seq as i64)
+    .bind(observed_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

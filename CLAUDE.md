@@ -238,6 +238,33 @@ cargo run -p sealedge-seal-cli --features yubikey -- wrap --backend yubikey --si
 cargo run -p sealedge-seal-cli -- emit-request --archive archive.seal --device-pub device.pub --out request.json --post http://localhost:3001/v1/verify
 ```
 
+### Key Rotation & Revocation (H1 Phase 2)
+
+A device chronicle can change signing identity over time. Every archive carries a
+monotonic `device.key_epoch` (epoch 0 = genesis / all pre-Phase-2 archives, emitted
+only when `> 0`). See `docs/designs/h1-phase2-rotation-revocation.md`.
+
+```bash
+# Rotate to a new (pre-generated) key: emits a dual-signed rotation entry and
+# advances the chronicle to the new key/epoch. The next wrap signs with new.key.
+cargo run -p sealedge-seal-cli -- keygen --out-key new.key --out-pub new.pub --unencrypted
+cargo run -p sealedge-seal-cli -- rekey --chronicle device.chronicle \
+  --old-key device.key --new-key new.key --out rot1.seal --unencrypted
+
+# verify-chronicle walks the identity change (--device-pub pins the GENESIS key)
+cargo run -p sealedge-seal-cli -- verify-chronicle clip0.seal rot1.seal clip2.seal --device-pub "ed25519:<genesis>"
+
+# Witness a rotation tip under the new key (attaches the rotation entry so the
+# platform records device lineage)
+cargo run -p sealedge-seal-cli -- witness --chronicle device.chronicle --device-key new.key \
+  --rotation rot1.seal --post http://localhost:3001/v1/witness --unencrypted
+
+# Revoke a device's key (org-admin, bearer-authenticated; monotonic-only)
+curl -X POST http://localhost:3001/v1/devices/<device-uuid>/revoke \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"revoked_at":"2026-08-05T00:00:00Z","min_epoch":1}'
+```
+
 ### Running the Demo
 
 ```bash
@@ -293,8 +320,8 @@ See `deploy/.env.example` for the full template with all variables documented.
 | `sealedge` | `crates/cli/src/main.rs` | Main envelope encryption CLI |
 | `sealedge-server` | `crates/core/src/bin/sealedge-server.rs` | Network server (TCP/QUIC transport) |
 | `sealedge-client` | `crates/core/src/bin/sealedge-client.rs` | Network client |
-| `sealedge-platform-server` | `crates/platform-server/src/main.rs` | Platform HTTP server (verify, verify-attestation, witness, JWKS, health, verify page) |
-| `seal` | `crates/seal-cli/src/main.rs` | Archive + attestation CLI (keygen/wrap/verify/verify-chronicle/witness/unwrap/emit-request/attest-sbom/verify-attestation) |
+| `sealedge-platform-server` | `crates/platform-server/src/main.rs` | Platform HTTP server (verify, verify-attestation, witness, device register/revoke, JWKS, health, verify page) |
+| `seal` | `crates/seal-cli/src/main.rs` | Archive + attestation CLI (keygen/wrap/verify/verify-chronicle/rekey/witness/unwrap/emit-request/attest-sbom/verify-attestation) |
 
 ## Common Tasks
 

@@ -447,3 +447,187 @@ async fn test_witness_rejects_bad_signature() {
     let resp = server.post("/v1/witness").json(&req).await;
     assert_eq!(resp.status_code(), 401);
 }
+
+// ─── H1 Phase 2: revocation & rotation lineage (POST /v1/devices/:id/revoke,
+//     witness gates) — require a live PostgreSQL ─────────────────────────────
+
+/// Register a device and return its UUID.
+#[cfg(all(feature = "http", feature = "postgres", feature = "test-utils"))]
+async fn register(server: &TestServer, token: &str, device_id: &str, device_pub: &str) -> Uuid {
+    let resp = server
+        .post("/v1/devices")
+        .add_header(
+            "Authorization".parse().unwrap(),
+            format!("Bearer {token}").parse().unwrap(),
+        )
+        .json(&json!({ "device_id": device_id, "device_pub": device_pub }))
+        .await;
+    assert_eq!(resp.status_code(), 200);
+    let body: serde_json::Value = resp.json();
+    body["id"].as_str().unwrap().parse().unwrap()
+}
+
+/// Call the revoke endpoint and return the HTTP status.
+#[cfg(all(feature = "http", feature = "postgres", feature = "test-utils"))]
+async fn revoke(server: &TestServer, token: &str, id: Uuid, body: serde_json::Value) -> u16 {
+    server
+        .post(&format!("/v1/devices/{id}/revoke"))
+        .add_header(
+            "Authorization".parse().unwrap(),
+            format!("Bearer {token}").parse().unwrap(),
+        )
+        .json(&body)
+        .await
+        .status_code()
+        .as_u16()
+}
+
+/// PA4: revocation is monotonic — earlier-only for `revoked_at`, non-decreasing
+/// for `min_epoch`; violations are 409.
+#[tokio::test]
+#[ignore]
+async fn test_revoke_is_monotonic() {
+    let (pool, _org_id, token) = setup_test_db().await;
+    let server = TestServer::new(create_test_app(pool)).unwrap();
+    let id = register(&server, &token, "dev-revoke", "ed25519:revoke-pub").await;
+
+    // First revoke at a specific instant with a floor.
+    assert_eq!(
+        revoke(
+            &server,
+            &token,
+            id,
+            json!({ "revoked_at": "2026-08-05T00:00:00Z", "min_epoch": 2 })
+        )
+        .await,
+        200
+    );
+    // Moving revoked_at LATER is rejected.
+    assert_eq!(
+        revoke(
+            &server,
+            &token,
+            id,
+            json!({ "revoked_at": "2026-08-09T00:00:00Z" })
+        )
+        .await,
+        409
+    );
+    // Moving it EARLIER is allowed.
+    assert_eq!(
+        revoke(
+            &server,
+            &token,
+            id,
+            json!({ "revoked_at": "2026-08-01T00:00:00Z" })
+        )
+        .await,
+        200
+    );
+    // Lowering min_epoch is rejected; raising it is allowed.
+    assert_eq!(
+        revoke(&server, &token, id, json!({ "min_epoch": 1 })).await,
+        409
+    );
+    assert_eq!(
+        revoke(&server, &token, id, json!({ "min_epoch": 5 })).await,
+        200
+    );
+}
+
+/// PA5: once revoked, a device is refused a NEW witness (403), but an
+/// already-witnessed entry still replays (200).
+#[tokio::test]
+#[ignore]
+async fn test_witness_refused_after_revoke() {
+    let (pool, _org_id, token) = setup_test_db().await;
+    let server = TestServer::new(create_test_app(pool)).unwrap();
+
+    let kp = sealedge_core::DeviceKeypair::generate().unwrap();
+    let id = register(&server, &token, "dev-w", &kp.public).await;
+
+    // Witness genesis before revocation.
+    let r0 = sealedge_core::WitnessRequest::create_signed(&kp, 0, "b3:aaa", "2026-08-05T00:00:00Z")
+        .unwrap();
+    assert_eq!(
+        server.post("/v1/witness").json(&r0).await.status_code(),
+        200
+    );
+
+    // Revoke the device.
+    let resp = server
+        .post(&format!("/v1/devices/{id}/revoke"))
+        .add_header(
+            "Authorization".parse().unwrap(),
+            format!("Bearer {token}").parse().unwrap(),
+        )
+        .json(&json!({}))
+        .await;
+    assert_eq!(resp.status_code(), 200);
+
+    // A NEW tip is refused (403); the already-witnessed genesis still replays.
+    let r1 = sealedge_core::WitnessRequest::create_signed(&kp, 1, "b3:bbb", "2026-08-05T00:01:00Z")
+        .unwrap();
+    assert_eq!(
+        server.post("/v1/witness").json(&r1).await.status_code(),
+        403
+    );
+    assert_eq!(
+        server.post("/v1/witness").json(&r0).await.status_code(),
+        200
+    );
+}
+
+/// PA1 + PA2: witnessing a rotation tip under the new key records lineage, after
+/// which the old key's ledger is closed beyond the rotation point (409).
+#[tokio::test]
+#[ignore]
+async fn test_rotation_lineage_closes_old_ledger() {
+    let (pool, _org_id, _token) = setup_test_db().await;
+    let server = TestServer::new(create_test_app(pool)).unwrap();
+
+    let old = sealedge_core::DeviceKeypair::generate().unwrap();
+    let new = sealedge_core::DeviceBundle::generate().unwrap();
+    let ts = "2026-08-05T00:00:00Z";
+
+    // Old key witnesses genesis (sequence 0).
+    let g = sealedge_core::WitnessRequest::create_signed(&old, 0, "b3:genesis", ts).unwrap();
+    assert_eq!(server.post("/v1/witness").json(&g).await.status_code(), 200);
+
+    // Build a rotation entry at sequence 1 whose prev is the genesis tip.
+    let rot = sealedge_core::RotationRecord::create_signed(
+        &old,
+        0,
+        &new,
+        1,
+        "b3:genesis".to_string(),
+        ts,
+    )
+    .unwrap();
+    let rot_tip = sealedge_core::format_archive_id(&rot.archive_digest());
+
+    // New key witnesses the rotation tip, attaching the rotation entry (PA1).
+    let mut wreq =
+        sealedge_core::WitnessRequest::create_signed(&new.signing, 1, &rot_tip, ts).unwrap();
+    wreq.rotation = Some(rot);
+    assert_eq!(
+        server.post("/v1/witness").json(&wreq).await.status_code(),
+        200
+    );
+
+    // PA2: the OLD key's ledger is now closed beyond the rotation — a new tip at
+    // sequence 2 under the old key is refused as superseded (409).
+    let old2 = sealedge_core::WitnessRequest::create_signed(&old, 2, "b3:evil", ts).unwrap();
+    assert_eq!(
+        server.post("/v1/witness").json(&old2).await.status_code(),
+        409
+    );
+
+    // The NEW key continues normally.
+    let new2 =
+        sealedge_core::WitnessRequest::create_signed(&new.signing, 2, "b3:cont", ts).unwrap();
+    assert_eq!(
+        server.post("/v1/witness").json(&new2).await.status_code(),
+        200
+    );
+}

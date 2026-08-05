@@ -96,7 +96,9 @@ pub fn create_router(state: AppState) -> Router {
     #[cfg(feature = "postgres")]
     let base = {
         use super::auth::auth_middleware;
-        use super::handlers::{get_receipt_handler, register_device_handler};
+        use super::handlers::{
+            get_receipt_handler, register_device_handler, revoke_device_handler,
+        };
         use axum::middleware;
 
         // Read CORS allowed origins from CORS_ORIGINS env var (comma-separated).
@@ -131,6 +133,7 @@ pub fn create_router(state: AppState) -> Router {
         // Auth-protected routes (devices, receipts)
         let protected = Router::new()
             .route("/v1/devices", post(register_device_handler))
+            .route("/v1/devices/:id/revoke", post(revoke_device_handler))
             .route("/v1/receipts/:id", get(get_receipt_handler))
             .layer(middleware::from_fn_with_state(
                 state.db_pool.clone(),
