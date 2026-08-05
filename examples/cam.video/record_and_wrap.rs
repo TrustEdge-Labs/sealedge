@@ -128,6 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             firmware_version: "1.0.0".to_string(),
             public_key: signing_public_key.clone(),
             key_agreement_public: Some(key_agreement_public.clone()),
+            key_epoch: None,
         },
         metadata: ProfileMetadata::CamVideo(CamVideoMetadata {
             started_at: started_at.clone(),

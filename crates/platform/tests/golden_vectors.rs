@@ -63,6 +63,7 @@ fn golden_manifest(public_key: &str) -> TrstManifest {
             firmware_version: "1.0.0".to_string(),
             public_key: public_key.to_string(),
             key_agreement_public: None,
+            key_epoch: None,
         },
         metadata: ProfileMetadata::Generic(GenericMetadata {
             started_at: "2025-01-15T10:30:00Z".to_string(),

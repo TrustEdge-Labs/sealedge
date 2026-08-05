@@ -27,8 +27,8 @@ use sealedge_core::{
     sign_manifest, validate_archive, verify_manifest, write_archive, AudioMetadata,
     CamVideoMetadata, ChronicleState, ChunkInfo, ContentKey, DeviceBundle, DeviceInfo,
     DeviceKeypair, EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata, PointAttestation,
-    ProfileMetadata, RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest, WitnessRequest,
-    CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
+    ProfileMetadata, RecipientEntry, RotationRecord, SegmentInfo, SensorMetadata, TrstManifest,
+    WitnessRequest, CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
 };
 use serde::Serialize;
 use std::time::Instant;
@@ -113,6 +113,7 @@ enum Commands {
     Wrap(WrapCmd),
     Verify(VerifyCmd),
     VerifyChronicle(VerifyChronicleCmd),
+    Rekey(RekeyCmd),
     Witness(WitnessCmd),
     Unwrap(UnwrapCmd),
     EmitRequest(EmitRequestCmd),
@@ -315,6 +316,37 @@ struct WitnessCmd {
 }
 
 #[derive(Args, Debug)]
+struct RekeyCmd {
+    #[arg(
+        long = "chronicle",
+        value_name = "PATH",
+        help = "Chronicle state file to rotate and advance"
+    )]
+    chronicle: PathBuf,
+    #[arg(
+        long = "old-key",
+        value_name = "PATH",
+        help = "Current device key bundle (authorizes the successor)"
+    )]
+    old_key: PathBuf,
+    #[arg(
+        long = "new-key",
+        value_name = "PATH",
+        help = "Pre-generated new device key bundle (run `seal keygen` first)"
+    )]
+    new_key: PathBuf,
+    #[arg(
+        long = "out",
+        value_name = "DIR",
+        help = "Output directory for the rotation entry (contains rotation.json)"
+    )]
+    out: PathBuf,
+    /// Accept plaintext key bundles without a passphrase (CI/automation only).
+    #[arg(long)]
+    unencrypted: bool,
+}
+
+#[derive(Args, Debug)]
 struct UnwrapCmd {
     #[arg(value_name = "ARCHIVE", help = "Path to .seal archive directory")]
     archive: PathBuf,
@@ -494,6 +526,7 @@ async fn run() -> Result<()> {
         Commands::Wrap(args) => handle_wrap(args),
         Commands::Verify(args) => handle_verify(args),
         Commands::VerifyChronicle(args) => handle_verify_chronicle(args).await,
+        Commands::Rekey(args) => handle_rekey(args),
         Commands::Witness(args) => handle_witness(args).await,
         Commands::Unwrap(args) => handle_unwrap(args),
         Commands::EmitRequest(args) => handle_emit_request(args).await,
@@ -1008,6 +1041,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
             firmware_version: "1.0.0".to_string(),
             public_key: signing_public_key.clone(),
             key_agreement_public: Some(ka_pub.clone()),
+            key_epoch: None, // stamped from chronicle state below (H1 Phase 2)
         },
         metadata,
         chunk: ChunkInfo {
@@ -1035,6 +1069,9 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
     if let Some(ref link) = chronicle_link {
         manifest.sequence = Some(link.sequence);
         manifest.prev_archive_hash = link.prev.clone();
+        // H1 Phase 2: stamp the signing key's epoch (omitted at epoch 0 so
+        // genesis archives canonicalize byte-identically to H1).
+        manifest.device.key_epoch = (link.key_epoch > 0).then_some(link.key_epoch);
     }
 
     // Encrypted mode: HPKE-wrap the CEK to each recipient. The HPKE aad binds
@@ -1131,6 +1168,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
                 device_pub: signing_public_key.clone(),
                 sequence: link.sequence,
                 tip,
+                key_epoch: link.key_epoch,
                 updated_at: current_timestamp()?,
             };
             state.save(state_path).with_context(|| {
@@ -1572,10 +1610,15 @@ fn output_continuity_error(args: &VerifyCmd, report: &VerifyReport) -> Result<()
 // Gap index information should come from structured error types, not string parsing
 
 /// A resolved chronicle link for `wrap`: the sequence to write, the optional
-/// predecessor digest, and the state file to advance (if any).
+/// predecessor digest, the key epoch to stamp, and the state file to advance
+/// (if any).
 struct ChronicleLink {
     sequence: u64,
     prev: Option<String>,
+    /// Key epoch of the signing identity (H1 Phase 2). Taken from the chronicle
+    /// state (the authoritative record of the current identity); 0 for genesis
+    /// and for the manual `--prev-*` escape hatches where no state is consulted.
+    key_epoch: u32,
     state_path: Option<PathBuf>,
 }
 
@@ -1600,6 +1643,8 @@ fn resolve_chronicle(
         return Ok(Some(ChronicleLink {
             sequence: prev_seq + 1,
             prev: Some(format_archive_id(&archive_digest(&m)?)),
+            // Same signing identity as the predecessor, so inherit its epoch.
+            key_epoch: m.device.key_epoch.unwrap_or(0),
             state_path: chronicle.map(|p| p.to_path_buf()),
         }));
     }
@@ -1610,6 +1655,8 @@ fn resolve_chronicle(
             return Ok(Some(ChronicleLink {
                 sequence: seq + 1,
                 prev: Some(hash.to_string()),
+                // Manual escape hatch: no manifest to read an epoch from.
+                key_epoch: 0,
                 state_path: chronicle.map(|p| p.to_path_buf()),
             }));
         }
@@ -1633,6 +1680,7 @@ fn resolve_chronicle(
             return Ok(Some(ChronicleLink {
                 sequence: st.sequence + 1,
                 prev: Some(st.tip),
+                key_epoch: st.key_epoch,
                 state_path: Some(path.to_path_buf()),
             }));
         }
@@ -1640,6 +1688,7 @@ fn resolve_chronicle(
         return Ok(Some(ChronicleLink {
             sequence: 0,
             prev: None,
+            key_epoch: 0,
             state_path: Some(path.to_path_buf()),
         }));
     }
@@ -1658,19 +1707,25 @@ fn validate_prev_hash(h: &str) -> Result<()> {
     Ok(())
 }
 
-/// Expand verify-chronicle path args into archive directories: a path holding a
-/// `manifest.json` is an archive; a plain directory is scanned for immediate
-/// archive children.
+/// True if a directory is a chronicle entry: a content archive (`manifest.json`)
+/// or a rotation entry (`rotation.json`, H1 Phase 2).
+fn is_chronicle_entry_dir(dir: &Path) -> bool {
+    dir.join("manifest.json").is_file() || dir.join("rotation.json").is_file()
+}
+
+/// Expand verify-chronicle path args into chronicle-entry directories: a path
+/// that is itself an entry is taken directly; a plain directory is scanned for
+/// immediate entry children (archives *and* rotation entries).
 fn collect_archive_dirs(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     for p in paths {
-        if p.join("manifest.json").is_file() {
+        if is_chronicle_entry_dir(p) {
             dirs.push(p.clone());
         } else if p.is_dir() {
             let mut children: Vec<PathBuf> = fs::read_dir(p)
                 .with_context(|| format!("Failed to read directory: {}", p.display()))?
                 .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|c| c.join("manifest.json").is_file())
+                .filter(|c| is_chronicle_entry_dir(c))
                 .collect();
             children.sort();
             dirs.append(&mut children);
@@ -1679,6 +1734,15 @@ fn collect_archive_dirs(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(dirs)
+}
+
+/// Read a rotation entry's `rotation.json` (H1 Phase 2).
+fn read_rotation(dir: &Path) -> Result<RotationRecord> {
+    let path = dir.join("rotation.json");
+    let bytes = fs::read(&path)
+        .with_context(|| format!("Failed to read rotation entry: {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("Malformed rotation entry: {}", path.display()))
 }
 
 async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
@@ -1698,15 +1762,43 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
         .into());
     }
 
+    // A chronicle entry is either a content archive or a rotation (H1 Phase 2).
+    // We collect structural info first (seq, digest, prev-link), then verify
+    // signatures during the active-identity walk below — signature validity
+    // depends on which identity is active at each point, which requires order.
+    enum EntryKind {
+        Archive(Box<TrstManifest>),
+        Rotation(Box<RotationRecord>),
+    }
     struct Entry {
         seq: u64,
         digest: [u8; 32],
         prev: Option<String>,
         path: PathBuf,
+        kind: EntryKind,
     }
     let mut entries: Vec<Entry> = Vec::with_capacity(archive_dirs.len());
 
     for dir in &archive_dirs {
+        if dir.join("rotation.json").is_file() {
+            let record = read_rotation(dir).map_err(|e| CliExitError {
+                code: 12,
+                message: format!("{}: {}", dir.display(), e),
+            })?;
+            require_supported_version(&record.trst_version).map_err(|e| CliExitError {
+                code: 12,
+                message: format!("{}: {}", dir.display(), e),
+            })?;
+            entries.push(Entry {
+                seq: record.sequence,
+                digest: record.archive_digest(),
+                prev: Some(record.prev_archive_hash.clone()),
+                path: dir.clone(),
+                kind: EntryKind::Rotation(Box::new(record)),
+            });
+            continue;
+        }
+
         let (manifest, _chunks) = read_archive(dir).map_err(|e| CliExitError {
             code: 12,
             message: format!("{}: archive read failed: {}", dir.display(), e),
@@ -1715,47 +1807,18 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
             code: 12,
             message: format!("{}: {}", dir.display(), e),
         })?;
-        if manifest.device.public_key != device_pub {
-            return Err(CliExitError {
-                code: 10,
-                message: format!(
-                    "{}: signed by {}, expected {}",
-                    dir.display(),
-                    manifest.device.public_key,
-                    device_pub
-                ),
-            }
-            .into());
-        }
-        let sig = manifest.signature.as_ref().ok_or_else(|| CliExitError {
-            code: 12,
-            message: format!("{}: manifest missing signature", dir.display()),
-        })?;
-        let canonical = manifest.to_canonical_bytes()?;
-        let sig_ok = verify_manifest(&device_pub, &canonical, sig).map_err(|e| CliExitError {
-            code: 10,
-            message: format!("{}: signature error: {}", dir.display(), e),
-        })?;
-        if !sig_ok {
-            return Err(CliExitError {
-                code: 10,
-                message: format!("{}: signature verification failed", dir.display()),
-            }
-            .into());
-        }
-        validate_archive(dir).map_err(|e| CliExitError {
-            code: 11,
-            message: format!("{}: continuity failed: {}", dir.display(), e),
-        })?;
         let seq = manifest.sequence.ok_or_else(|| CliExitError {
             code: 13,
             message: format!("{}: not a chronicle archive (no sequence)", dir.display()),
         })?;
+        let digest = archive_digest(&manifest)?;
+        let prev = manifest.prev_archive_hash.clone();
         entries.push(Entry {
             seq,
-            digest: archive_digest(&manifest)?,
-            prev: manifest.prev_archive_hash.clone(),
+            digest,
+            prev,
             path: dir.clone(),
+            kind: EntryKind::Archive(Box::new(manifest)),
         });
     }
 
@@ -1777,7 +1840,15 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
         }
     }
 
-    // Genesis must have no predecessor.
+    // Genesis must be a content archive with no predecessor — a chronicle cannot
+    // begin with a rotation (there is no prior identity to rotate from).
+    if matches!(entries[0].kind, EntryKind::Rotation(_)) {
+        return Err(CliExitError {
+            code: 13,
+            message: "genesis (sequence 0) must be a content archive, not a rotation".to_string(),
+        }
+        .into());
+    }
     if let Some(prev) = &entries[0].prev {
         return Err(CliExitError {
             code: 13,
@@ -1786,7 +1857,7 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
         .into());
     }
 
-    // Linkage: each archive points at the previous one's digest.
+    // Linkage: each entry points at the previous entry's digest (kind-agnostic).
     for k in 1..entries.len() {
         let expected = format_archive_id(&entries[k - 1].digest);
         match &entries[k].prev {
@@ -1811,11 +1882,122 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
         }
     }
 
+    // Active-identity walk (design §4). `--device-pub` pins the GENESIS identity;
+    // each rotation switches the active signer forward. `signer_at_seq[k]` is the
+    // identity in effect AFTER processing entry k — i.e. the key the device holds
+    // (and would witness with) at that tip. Used by the witness cross-check (PA3).
+    let mut active_signer = device_pub.clone();
+    let mut active_epoch: u32 = 0;
+    let mut rotations = 0usize;
+    let mut signer_at_seq: Vec<String> = Vec::with_capacity(entries.len());
+
+    for e in &entries {
+        match &e.kind {
+            EntryKind::Archive(m) => {
+                if m.device.public_key != active_signer {
+                    return Err(CliExitError {
+                        code: 10,
+                        message: format!(
+                            "{}: signed by {}, but the active identity at sequence {} is {}",
+                            e.path.display(),
+                            m.device.public_key,
+                            e.seq,
+                            active_signer
+                        ),
+                    }
+                    .into());
+                }
+                let epoch = m.device.key_epoch.unwrap_or(0);
+                if epoch != active_epoch {
+                    return Err(CliExitError {
+                        code: 13,
+                        message: format!(
+                            "{}: key_epoch {} does not match the active epoch {} at sequence {}",
+                            e.path.display(),
+                            epoch,
+                            active_epoch,
+                            e.seq
+                        ),
+                    }
+                    .into());
+                }
+                let sig = m.signature.as_ref().ok_or_else(|| CliExitError {
+                    code: 12,
+                    message: format!("{}: manifest missing signature", e.path.display()),
+                })?;
+                let canonical = m.to_canonical_bytes()?;
+                let sig_ok = verify_manifest(&active_signer, &canonical, sig).map_err(|err| {
+                    CliExitError {
+                        code: 10,
+                        message: format!("{}: signature error: {}", e.path.display(), err),
+                    }
+                })?;
+                if !sig_ok {
+                    return Err(CliExitError {
+                        code: 10,
+                        message: format!("{}: signature verification failed", e.path.display()),
+                    }
+                    .into());
+                }
+                validate_archive(&e.path).map_err(|err| CliExitError {
+                    code: 11,
+                    message: format!("{}: continuity failed: {}", e.path.display(), err),
+                })?;
+            }
+            EntryKind::Rotation(r) => {
+                // Authorization: the old identity must be the active signer/epoch.
+                if r.old.public_key != active_signer {
+                    return Err(CliExitError {
+                        code: 13,
+                        message: format!(
+                            "{}: rotation supersedes {}, but the active identity at sequence {} is {}",
+                            e.path.display(),
+                            r.old.public_key,
+                            e.seq,
+                            active_signer
+                        ),
+                    }
+                    .into());
+                }
+                if r.old.key_epoch != active_epoch {
+                    return Err(CliExitError {
+                        code: 13,
+                        message: format!(
+                            "{}: rotation old epoch {} does not match active epoch {} at sequence {}",
+                            e.path.display(),
+                            r.old.key_epoch,
+                            active_epoch,
+                            e.seq
+                        ),
+                    }
+                    .into());
+                }
+                // Both co-signatures + the exact +1 epoch bump (core-verified).
+                if !r.verify() {
+                    return Err(CliExitError {
+                        code: 10,
+                        message: format!(
+                            "{}: rotation co-signature/epoch verification failed",
+                            e.path.display()
+                        ),
+                    }
+                    .into());
+                }
+                active_signer = r.new.public_key.clone();
+                active_epoch = r.new.key_epoch;
+                rotations += 1;
+            }
+        }
+        signer_at_seq.push(active_signer.clone());
+    }
+
     let last = entries
         .last()
         .expect("entries is non-empty (checked above)");
     let tip = format_archive_id(&last.digest);
     let tip_seq = last.seq;
+    let tip_signer = active_signer.clone();
+    let tip_epoch = active_epoch;
 
     // Optional witness cross-check (design §6): the offline chain can't detect
     // TAIL deletion — a platform witness receipt can. The local tip must be at or
@@ -1827,16 +2009,9 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
         })?;
         let jwks = load_jwks(args.witness_jwks.as_deref()).await?;
         let (w_dev, w_seq, w_tip) = verify_witness_receipt_jws(&token, &jwks)?;
-        // The receipt must be for THIS chain's signer, or it's meaningless here.
-        if w_dev != device_pub {
-            return Err(CliExitError {
-                code: 13,
-                message: format!(
-                    "witness receipt is for device {w_dev}, not the chain's signer {device_pub}"
-                ),
-            }
-            .into());
-        }
+        // Tail deletion: the local tip must be at or ahead of the witnessed tip.
+        // (Checked before the identity binding so a truncated chain — which may not
+        // even reach w_seq in signer_at_seq — reports the honest error.)
         if tip_seq < w_seq {
             return Err(CliExitError {
                 code: 13,
@@ -1847,11 +2022,30 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
             }
             .into());
         }
-        if tip_seq == w_seq && tip != w_tip {
+        // PA3: bind the receipt to the ACTIVE signer at the witnessed sequence, not
+        // to the genesis pin. On a rotated chain the device witnesses under its
+        // current key, so the receipt's device_pub is the identity in effect at
+        // w_seq — not the genesis identity `--device-pub`.
+        let expected_signer = &signer_at_seq[w_seq as usize];
+        if w_dev != *expected_signer {
             return Err(CliExitError {
                 code: 13,
                 message: format!(
-                    "tip mismatch at sequence {w_seq}: local {tip} vs witnessed {w_tip}"
+                    "witness receipt is for device {w_dev}, but the active identity at \
+                     sequence {w_seq} is {expected_signer}"
+                ),
+            }
+            .into());
+        }
+        // The witnessed tip must match our local entry at that sequence (catches a
+        // fork that diverged at or before the witnessed point, even if local is
+        // ahead overall).
+        let local_at_wseq = format_archive_id(&entries[w_seq as usize].digest);
+        if w_tip != local_at_wseq {
+            return Err(CliExitError {
+                code: 13,
+                message: format!(
+                    "tip mismatch at sequence {w_seq}: local {local_at_wseq} vs witnessed {w_tip}"
                 ),
             }
             .into());
@@ -1864,9 +2058,12 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
             "chronicle": "pass",
             "device_pub": device_pub,
             "count": entries.len(),
+            "rotations": rotations,
             "first_sequence": 0,
             "tip_sequence": tip_seq,
             "tip": tip,
+            "current_identity": tip_signer,
+            "current_epoch": tip_epoch,
         });
         if let Some((w_seq, w_tip)) = &witnessed {
             out["witnessed_sequence"] = serde_json::json!(w_seq);
@@ -1875,8 +2072,17 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
         println!("{}", serde_json::to_string(&out)?);
     } else {
         println!("Chronicle: PASS");
-        println!("Device: {device_pub}");
-        println!("Archives: {} (sequence 0..{})", entries.len(), tip_seq);
+        println!("Genesis device: {device_pub}");
+        println!(
+            "Entries: {} (sequence 0..{}, {} rotation{})",
+            entries.len(),
+            tip_seq,
+            rotations,
+            if rotations == 1 { "" } else { "s" }
+        );
+        if rotations > 0 {
+            println!("Current identity: {tip_signer} (epoch {tip_epoch})");
+        }
         println!("Tip: {tip} @ sequence {tip_seq}");
         if let Some((w_seq, _)) = &witnessed {
             if tip_seq == *w_seq {
@@ -1979,6 +2185,100 @@ fn verify_witness_receipt_jws(token: &str, jwks_json: &str) -> Result<(String, u
         .ok_or_else(|| anyhow::anyhow!("witness receipt missing 'tip'"))?
         .to_string();
     Ok((device_pub, seq, tip))
+}
+
+/// Rotate a chronicle to a new signing identity (H1 Phase 2, design §3.2).
+/// Emits a dual-signed rotation entry and advances the chronicle state to the
+/// new key/epoch, so the next `seal wrap --chronicle` signs under the new key.
+fn handle_rekey(args: RekeyCmd) -> Result<()> {
+    if args.unencrypted {
+        warn_unencrypted();
+    }
+
+    // PN4: rotating requires an existing chronicle to rotate FROM.
+    if !args.chronicle.exists() {
+        anyhow::bail!(
+            "nothing to rotate: no chronicle state at {} (start one with `seal wrap --chronicle` first)",
+            args.chronicle.display()
+        );
+    }
+    let state = ChronicleState::load(&args.chronicle).with_context(|| {
+        format!(
+            "Failed to read chronicle state: {}",
+            args.chronicle.display()
+        )
+    })?;
+
+    let old = load_bundle(&args.old_key, args.unencrypted)
+        .with_context(|| format!("Failed to load --old-key: {}", args.old_key.display()))?;
+    let new = load_bundle(&args.new_key, args.unencrypted)
+        .with_context(|| format!("Failed to load --new-key: {}", args.new_key.display()))?;
+
+    // The old key must be the chronicle's current active identity.
+    if old.signing.public != state.device_pub {
+        anyhow::bail!(
+            "--old-key ({}) is not the chronicle's current identity ({})",
+            old.signing.public,
+            state.device_pub
+        );
+    }
+    if new.signing.public == old.signing.public {
+        anyhow::bail!("--new-key must differ from --old-key");
+    }
+    if args.out.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite existing path: {}",
+            args.out.display()
+        );
+    }
+
+    let sequence = state.sequence + 1;
+    let record = RotationRecord::create_signed(
+        &old.signing,
+        state.key_epoch,
+        &new,
+        sequence,
+        state.tip.clone(),
+        current_timestamp()?,
+    )?;
+
+    // A rotation entry on disk is a directory holding a single rotation.json
+    // (no manifest.json, no chunks/), so verify-chronicle collects it naturally.
+    fs::create_dir_all(&args.out).with_context(|| {
+        format!(
+            "Failed to create rotation entry directory: {}",
+            args.out.display()
+        )
+    })?;
+    let rotation_path = args.out.join("rotation.json");
+    let json = serde_json::to_string_pretty(&record)?;
+    fs::write(&rotation_path, format!("{json}\n"))
+        .with_context(|| format!("Failed to write {}", rotation_path.display()))?;
+
+    // Advance the chronicle head to the NEW identity/epoch.
+    let tip = format_archive_id(&record.archive_digest());
+    let new_state = ChronicleState {
+        device_pub: new.signing.public.clone(),
+        sequence,
+        tip: tip.clone(),
+        key_epoch: record.new.key_epoch,
+        updated_at: current_timestamp()?,
+    };
+    new_state.save(&args.chronicle).with_context(|| {
+        format!(
+            "Failed to update chronicle state: {}",
+            args.chronicle.display()
+        )
+    })?;
+
+    println!("Rotation: sequence {sequence}");
+    println!(
+        "  {} (epoch {}) \u{2192} {} (epoch {})",
+        old.signing.public, state.key_epoch, new.signing.public, record.new.key_epoch
+    );
+    println!("  entry: {}", rotation_path.display());
+    println!("  tip:   {tip}");
+    Ok(())
 }
 
 async fn handle_witness(args: WitnessCmd) -> Result<()> {

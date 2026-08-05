@@ -139,6 +139,12 @@ pub struct DeviceInfo {
     /// `public_key`; absent in `0.1.0` / sign-only construction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_agreement_public: Option<String>,
+    /// Key epoch of `public_key` within the device chronicle (H1 Phase 2).
+    /// Absent ⇒ epoch 0 (the genesis key / all pre-Phase-2 archives). Emitted only
+    /// when `> 0`, so epoch-0 archives canonicalize byte-identically to H1 and the
+    /// golden vectors are unaffected. Incremented by exactly 1 at each rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_epoch: Option<u32>,
 }
 
 /// Chunk configuration for the archive.
@@ -250,6 +256,7 @@ impl TrstManifest {
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
                 key_agreement_public: None,
+                key_epoch: None,
             },
             metadata: ProfileMetadata::Generic(GenericMetadata::default()),
             chunk: ChunkInfo {
@@ -276,6 +283,7 @@ impl TrstManifest {
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
                 key_agreement_public: None,
+                key_epoch: None,
             },
             metadata: ProfileMetadata::CamVideo(CamVideoMetadata {
                 started_at: String::new(),
@@ -345,6 +353,13 @@ impl TrstManifest {
                 ",\"key_agreement_public\":{}",
                 serde_json::to_string(ka)?
             ));
+        }
+        // H1 Phase 2 (0.2.0): key epoch, emitted only when > 0 so epoch-0 archives
+        // (all pre-Phase-2 clips) canonicalize byte-identically to before.
+        if let Some(epoch) = manifest.device.key_epoch {
+            if epoch > 0 {
+                result.push_str(&format!(",\"key_epoch\":{epoch}"));
+            }
         }
         result.push('}');
 
@@ -626,6 +641,7 @@ impl TrstManifest {
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
                 key_agreement_public: None,
+                key_epoch: None,
             },
             metadata: ProfileMetadata::Sensor(SensorMetadata {
                 started_at: String::new(),
@@ -662,6 +678,7 @@ impl TrstManifest {
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
                 key_agreement_public: None,
+                key_epoch: None,
             },
             metadata: ProfileMetadata::Audio(AudioMetadata {
                 started_at: String::new(),
@@ -695,6 +712,7 @@ impl TrstManifest {
                 firmware_version: "1.0.0".to_string(),
                 public_key: String::new(),
                 key_agreement_public: None,
+                key_epoch: None,
             },
             metadata: ProfileMetadata::Log(LogMetadata {
                 started_at: String::new(),
@@ -942,6 +960,16 @@ impl TrstManifest {
                     ));
                 }
             }
+        }
+
+        // H1 Phase 2 (0.2.0): key epoch is represented by absence at epoch 0, so an
+        // explicit `Some(0)` is a malformed manifest (it would also fail to
+        // round-trip through the canonical form, which omits epoch 0).
+        if self.device.key_epoch == Some(0) {
+            return Err(ManifestFormatError::InvalidField(
+                "device.key_epoch must be >= 1 when present (epoch 0 is represented by absence)"
+                    .to_string(),
+            ));
         }
 
         Ok(())
@@ -1828,5 +1856,106 @@ mod tests {
         let round: TrstManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(round.sequence, Some(7));
         assert_eq!(round.prev_archive_hash.as_deref(), Some(b3('f').as_str()));
+    }
+
+    // ── H1 Phase 2 (0.2.0) device.key_epoch ──
+
+    #[test]
+    fn test_absent_epoch_bytes_unchanged() {
+        // Epoch 0 is represented by absence, so an epoch-0 manifest (all pre-Phase-2
+        // archives) must canonicalize with NO key_epoch field — this keeps the
+        // C4/H1 golden vectors valid after the type change.
+        let mut m = generic_manifest();
+        assert!(m.device.key_epoch.is_none());
+        let json = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+        assert!(!json.contains("key_epoch"), "absent epoch: {json}");
+
+        // Explicit Some(0) must also emit nothing (epoch 0 == absence on the wire).
+        m.device.key_epoch = Some(0);
+        let json0 = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+        assert!(
+            !json0.contains("key_epoch"),
+            "Some(0) emits nothing: {json0}"
+        );
+    }
+
+    #[test]
+    fn test_epoch_canonical_order_and_shape() {
+        let mut m = generic_manifest();
+        m.device.key_agreement_public = Some("x25519:DEVKA".to_string());
+        m.device.key_epoch = Some(2);
+
+        let json = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+        // Emitted as a bare number, not a string.
+        assert!(json.contains("\"key_epoch\":2"), "bare number: {json}");
+        assert!(!json.contains("\"key_epoch\":\"2\""));
+
+        // Order inside device: public_key < key_agreement_public < key_epoch < (end).
+        let pubk = json.find("\"public_key\"").unwrap();
+        let ka = json.find("\"key_agreement_public\"").unwrap();
+        let epoch = json.find("\"key_epoch\"").unwrap();
+        let meta = json.find("\"metadata\"").unwrap();
+        assert!(
+            pubk < ka && ka < epoch && epoch < meta,
+            "order public_key<key_agreement_public<key_epoch<metadata: {json}"
+        );
+    }
+
+    #[test]
+    fn test_epoch_without_key_agreement() {
+        // key_epoch may be present even when key_agreement_public is absent
+        // (sign-only rotated chronicle): it still slots right after public_key.
+        let mut m = generic_manifest();
+        m.device.key_epoch = Some(1);
+        let json = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+        assert!(!json.contains("key_agreement_public"));
+        let pubk = json.find("\"public_key\"").unwrap();
+        let epoch = json.find("\"key_epoch\"").unwrap();
+        let meta = json.find("\"metadata\"").unwrap();
+        assert!(pubk < epoch && epoch < meta, "order: {json}");
+    }
+
+    #[test]
+    fn test_epoch_excluded_signature_stable() {
+        let mut m = generic_manifest();
+        m.device.key_epoch = Some(3);
+        let b1 = m.to_canonical_bytes().unwrap();
+        m.set_signature("ed25519:whatever".to_string());
+        let b2 = m.to_canonical_bytes().unwrap();
+        assert_eq!(b1, b2, "signature stays excluded from canonical bytes");
+    }
+
+    #[test]
+    fn test_validate_rejects_explicit_epoch_zero() {
+        // Some(0) is malformed: epoch 0 must be represented by absence, and it
+        // would not round-trip through the canonical form.
+        let mut m = generic_manifest();
+        m.device.key_epoch = Some(0);
+        let err = m.validate().unwrap_err();
+        assert!(
+            format!("{err}").contains("key_epoch must be >= 1"),
+            "expected epoch-0 rejection, got: {err}"
+        );
+
+        // Absent and >= 1 both validate.
+        m.device.key_epoch = None;
+        assert!(m.validate().is_ok());
+        m.device.key_epoch = Some(1);
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn test_epoch_round_trip() {
+        let mut m = generic_manifest();
+        m.device.key_epoch = Some(5);
+        let json = serde_json::to_string(&m).unwrap();
+        let round: TrstManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.device.key_epoch, Some(5));
+
+        // A manifest with no key_epoch key deserializes to None (default), so
+        // pre-Phase-2 manifests load unchanged.
+        let no_epoch = json.replace(",\"key_epoch\":5", "");
+        let round2: TrstManifest = serde_json::from_str(&no_epoch).unwrap();
+        assert_eq!(round2.device.key_epoch, None);
     }
 }

@@ -73,6 +73,7 @@ fn build_real_signed_manifest_with_key(
             firmware_version: "1.0.0".to_string(),
             public_key: keypair.public.clone(),
             key_agreement_public: None,
+            key_epoch: None,
         },
         metadata: ProfileMetadata::Generic(GenericMetadata {
             started_at: "2025-01-15T10:30:00Z".to_string(),

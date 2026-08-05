@@ -381,6 +381,7 @@ mod tests {
                 firmware_version: "1.0.0".to_string(),
                 public_key: "ed25519:k".to_string(),
                 key_agreement_public: None,
+                key_epoch: None,
             },
             metadata: ProfileMetadata::Generic(GenericMetadata {
                 started_at: "t0".to_string(),
