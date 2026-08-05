@@ -86,6 +86,7 @@ fn build_real_signed_manifest_with_key(
         segments: seg_infos,
         claims: vec!["location:unknown".to_string()],
         encryption: None,
+        sequence: None,
         prev_archive_hash: None,
         signature: None,
     };

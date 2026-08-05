@@ -944,6 +944,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         segments,
         claims: vec!["location:unknown".to_string()],
         encryption: None,
+        sequence: None,
         prev_archive_hash: None,
         signature: None,
     };

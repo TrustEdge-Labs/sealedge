@@ -217,6 +217,11 @@ pub struct TrstManifest {
     /// ("sign-only"); `Some` carries the per-recipient wrapped CEKs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<EncryptionBlock>,
+    /// Monotonic per-device chronicle position (H1, `0.2.0`). Present ⇒ this
+    /// archive is part of a chronicle; `0` = genesis (`prev_archive_hash`
+    /// absent). Absent ⇒ a standalone archive (today's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_archive_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -237,7 +242,7 @@ impl TrstManifest {
     /// Create a new manifest with the `generic` profile and empty metadata.
     pub fn new() -> Self {
         Self {
-            trst_version: "0.1.0".to_string(),
+            trst_version: "0.2.0".to_string(),
             profile: "generic".to_string(),
             device: DeviceInfo {
                 id: String::new(),
@@ -254,6 +259,7 @@ impl TrstManifest {
             segments: Vec::new(),
             claims: Vec::new(),
             encryption: None,
+            sequence: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -262,7 +268,7 @@ impl TrstManifest {
     /// Create a new manifest pre-configured for the `cam.video` profile.
     pub fn new_cam_video() -> Self {
         Self {
-            trst_version: "0.1.0".to_string(),
+            trst_version: "0.2.0".to_string(),
             profile: "cam.video".to_string(),
             device: DeviceInfo {
                 id: String::new(),
@@ -286,6 +292,7 @@ impl TrstManifest {
             segments: Vec::new(),
             claims: Vec::new(),
             encryption: None,
+            sequence: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -587,6 +594,13 @@ impl TrstManifest {
             result.push('}');
         }
 
+        // H1 (0.2.0): chronicle sequence, emitted only when present (bare
+        // number). Sits between the encryption block and prev_archive_hash so
+        // non-chronicle manifests canonicalize byte-identically to before.
+        if let Some(seq) = manifest.sequence {
+            result.push_str(&format!(",\"sequence\":{}", seq));
+        }
+
         // Optional prev_archive_hash
         if let Some(ref prev_hash) = manifest.prev_archive_hash {
             result.push_str(&format!(
@@ -604,7 +618,7 @@ impl TrstManifest {
     /// Create a new manifest pre-configured for the `sensor` profile.
     pub fn new_sensor() -> Self {
         Self {
-            trst_version: "0.1.0".to_string(),
+            trst_version: "0.2.0".to_string(),
             profile: "sensor".to_string(),
             device: DeviceInfo {
                 id: String::new(),
@@ -631,6 +645,7 @@ impl TrstManifest {
             segments: Vec::new(),
             claims: Vec::new(),
             encryption: None,
+            sequence: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -639,7 +654,7 @@ impl TrstManifest {
     /// Create a new manifest pre-configured for the `audio` profile.
     pub fn new_audio() -> Self {
         Self {
-            trst_version: "0.1.0".to_string(),
+            trst_version: "0.2.0".to_string(),
             profile: "audio".to_string(),
             device: DeviceInfo {
                 id: String::new(),
@@ -663,6 +678,7 @@ impl TrstManifest {
             segments: Vec::new(),
             claims: Vec::new(),
             encryption: None,
+            sequence: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -671,7 +687,7 @@ impl TrstManifest {
     /// Create a new manifest pre-configured for the `log` profile.
     pub fn new_log() -> Self {
         Self {
-            trst_version: "0.1.0".to_string(),
+            trst_version: "0.2.0".to_string(),
             profile: "log".to_string(),
             device: DeviceInfo {
                 id: String::new(),
@@ -695,6 +711,7 @@ impl TrstManifest {
             segments: Vec::new(),
             claims: Vec::new(),
             encryption: None,
+            sequence: None,
             prev_archive_hash: None,
             signature: None,
         }
@@ -888,6 +905,42 @@ impl TrstManifest {
                     "encryption.recipients cannot be empty (use sign-only mode for no encryption)"
                         .to_string(),
                 ));
+            }
+        }
+
+        // H1 (0.2.0): chronicle well-formedness (design §3.2). Cross-archive
+        // linkage (prev matches the real predecessor) is checked by
+        // verify-chronicle, which needs more than one archive.
+        match (self.sequence, self.prev_archive_hash.as_deref()) {
+            // Standalone archive: neither field.
+            (None, None) => {}
+            // Genesis: sequence 0, no predecessor.
+            (Some(0), None) => {}
+            (None, Some(_)) => {
+                return Err(ManifestFormatError::InvalidField(
+                    "prev_archive_hash requires a sequence".to_string(),
+                ))
+            }
+            (Some(0), Some(_)) => {
+                return Err(ManifestFormatError::InvalidField(
+                    "genesis archive (sequence 0) must not set prev_archive_hash".to_string(),
+                ))
+            }
+            (Some(_), None) => {
+                return Err(ManifestFormatError::InvalidField(
+                    "sequence > 0 requires prev_archive_hash".to_string(),
+                ))
+            }
+            (Some(_), Some(prev)) => {
+                let well_formed = prev
+                    .strip_prefix("b3:")
+                    .map(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .unwrap_or(false);
+                if !well_formed {
+                    return Err(ManifestFormatError::InvalidField(
+                        "prev_archive_hash must be 'b3:<64 hex>'".to_string(),
+                    ));
+                }
             }
         }
 
@@ -1140,7 +1193,7 @@ mod tests {
     #[test]
     fn test_manifest_creation() {
         let manifest = TrstManifest::new_cam_video();
-        assert_eq!(manifest.trst_version, "0.1.0");
+        assert_eq!(manifest.trst_version, "0.2.0");
         assert_eq!(manifest.profile, "cam.video");
         assert_eq!(manifest.device.model, "TrustEdgeRefCam");
         if let ProfileMetadata::CamVideo(m) = &manifest.metadata {
@@ -1677,5 +1730,103 @@ mod tests {
         assert_eq!(enc.content_aead, "XChaCha20Poly1305");
         assert_eq!(enc.recipients.len(), 2);
         assert_eq!(enc.recipients[1].recipient_id, "b3:bbbb");
+    }
+
+    // ── H1 (0.2.0) chronicle sequence / prev_archive_hash ──
+
+    fn b3(byte: char) -> String {
+        format!("b3:{}", byte.to_string().repeat(64))
+    }
+
+    #[test]
+    fn test_absent_sequence_bytes_unchanged() {
+        // A standalone (non-chronicle) manifest must canonicalize with NO new
+        // fields — this keeps the C4 golden vectors valid after the type change.
+        let m = generic_manifest();
+        let json = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+        assert!(!json.contains("sequence"));
+        assert!(!json.contains("prev_archive_hash"));
+    }
+
+    #[test]
+    fn test_sequence_canonical_order_and_shape() {
+        let mut m = generic_manifest();
+        m.sequence = Some(3);
+        m.prev_archive_hash = Some(b3('a'));
+
+        let json = String::from_utf8(m.to_canonical_bytes().unwrap()).unwrap();
+        // Emitted as a bare number, not a string.
+        assert!(json.contains("\"sequence\":3"), "bare number: {json}");
+        assert!(!json.contains("\"sequence\":\"3\""));
+
+        // Order: claims < sequence < prev_archive_hash.
+        let claims = json.find("\"claims\"").unwrap();
+        let seq = json.find("\"sequence\"").unwrap();
+        let prev = json.find("\"prev_archive_hash\"").unwrap();
+        assert!(
+            claims < seq && seq < prev,
+            "order claims<sequence<prev: {json}"
+        );
+    }
+
+    #[test]
+    fn test_sequence_excluded_signature_stable() {
+        let mut m = generic_manifest();
+        m.sequence = Some(1);
+        m.prev_archive_hash = Some(b3('0'));
+        let b1 = m.to_canonical_bytes().unwrap();
+        m.set_signature("ed25519:whatever".to_string());
+        let b2 = m.to_canonical_bytes().unwrap();
+        assert_eq!(b1, b2, "signature stays excluded from canonical bytes");
+    }
+
+    #[test]
+    fn test_validate_chronicle_rules() {
+        // genesis: sequence 0, no predecessor — ok
+        let mut m = generic_manifest();
+        m.sequence = Some(0);
+        assert!(
+            m.validate().is_ok(),
+            "genesis (seq 0, no prev) must validate"
+        );
+
+        // linked: sequence 1 + well-formed prev — ok
+        let mut m = generic_manifest();
+        m.sequence = Some(1);
+        m.prev_archive_hash = Some(b3('0'));
+        assert!(m.validate().is_ok(), "linked archive must validate");
+
+        // prev without sequence — err
+        let mut m = generic_manifest();
+        m.prev_archive_hash = Some(b3('0'));
+        assert!(m.validate().is_err(), "prev without sequence must fail");
+
+        // genesis with prev — err
+        let mut m = generic_manifest();
+        m.sequence = Some(0);
+        m.prev_archive_hash = Some(b3('0'));
+        assert!(m.validate().is_err(), "genesis with prev must fail");
+
+        // sequence > 0 without prev — err
+        let mut m = generic_manifest();
+        m.sequence = Some(2);
+        assert!(m.validate().is_err(), "seq>0 without prev must fail");
+
+        // malformed prev (not b3:<64 hex>) — err
+        let mut m = generic_manifest();
+        m.sequence = Some(1);
+        m.prev_archive_hash = Some("deadbeef".to_string());
+        assert!(m.validate().is_err(), "malformed prev must fail");
+    }
+
+    #[test]
+    fn test_chronicle_round_trip() {
+        let mut m = generic_manifest();
+        m.sequence = Some(7);
+        m.prev_archive_hash = Some(b3('f'));
+        let json = serde_json::to_string(&m).unwrap();
+        let round: TrstManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.sequence, Some(7));
+        assert_eq!(round.prev_archive_hash.as_deref(), Some(b3('f').as_str()));
     }
 }

@@ -144,6 +144,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         segments,
         claims: vec!["location:example".to_string()],
         encryption: None,
+        sequence: None,
         prev_archive_hash: None,
         signature: None,
     };

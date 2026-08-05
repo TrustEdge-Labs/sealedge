@@ -394,6 +394,7 @@ mod tests {
             segments: seg_infos,
             claims: vec![],
             encryption: None,
+            sequence: None,
             prev_archive_hash: None,
             signature: None,
         };
