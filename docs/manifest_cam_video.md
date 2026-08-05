@@ -31,7 +31,8 @@ pub struct TrstManifest {
     pub segments: Vec<SegmentInfo>,          // Per-segment verification data
     pub claims: Vec<String>,                 // Additional claims (e.g. "location:unknown")
     pub encryption: Option<EncryptionBlock>, // Content-encryption metadata; None = sign-only
-    pub prev_archive_hash: Option<String>,   // Chain to previous archive (optional)
+    pub sequence: Option<u64>,               // Chronicle position (H1); 0 = genesis, absent = standalone
+    pub prev_archive_hash: Option<String>,   // b3:<hex> of the previous archive (H1); absent at genesis
     pub signature: Option<String>,           // Ed25519 signature (excluded from canonical bytes)
 }
 
@@ -127,7 +128,7 @@ order:
 
 ```
 trst_version, profile, device, metadata, chunk, segments, claims,
-encryption?, prev_archive_hash?
+encryption?, sequence?, prev_archive_hash?
 ```
 
 Within nested objects the order is also fixed:
@@ -143,9 +144,11 @@ Recipients and segments serialize in array order.
 
 ### 2. Optional Fields Emitted Only When Present
 
-`key_agreement_public`, `encryption`, and `prev_archive_hash` are written only
-when set. Sign-only / key-agreement-less manifests therefore canonicalize
-without those keys. Within metadata, `labels` are emitted as a sorted map
+`key_agreement_public`, `encryption`, `sequence`, and `prev_archive_hash` are
+written only when set. Sign-only / key-agreement-less / non-chronicle manifests
+therefore canonicalize without those keys. A chronicle archive carries a
+monotonic `sequence` (0 = genesis, no `prev_archive_hash`); later archives set
+`prev_archive_hash` to `b3:<hex>` of the previous manifest's canonical bytes. Within metadata, `labels` are emitted as a sorted map
 (keys are sorted) and are omitted when empty.
 
 ### 3. Segment Hashes Are Bare Hex

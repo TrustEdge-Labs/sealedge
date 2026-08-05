@@ -8,9 +8,15 @@ Project: sealedge — Privacy and trust at the edge.
 
 # H1 — Device chronicle (cross-archive continuity) + witness receipts
 
-Status: **APPROVED (with amendments A1–A6, nits N1–N5; review 2026-08).**
-Implements H1 first; key rotation / revocation / key-epoch (C4 §12 "Phase 2")
-are designed here for coherence but land in a following phase.
+Status: **APPROVED (amendments A1–A6, nits N1–N5) — H1.1–H1.5 IMPLEMENTED.**
+Chronicle linkage, `verify-chronicle`, the platform witness endpoint, and the
+`seal witness` / `--witness` cross-check have shipped. Key rotation / revocation /
+key-epoch (§8; C4 §12 "Phase 2") remain designed-only for a following phase.
+
+> **Implementation note (A4 reconciliation):** the witness receipt JWS omits
+> `aud` to match the existing verification receipts (which carry no `aud`), rather
+> than introducing `JWT_AUDIENCE` on only one receipt type. Everything else in
+> §7.3 shipped as written.
 
 Related: [C4 content-encryption redesign](c4-content-encryption-redesign.md)
 (§12 reserved these mechanisms). Trust-model lineage: C1 (canonical signing),

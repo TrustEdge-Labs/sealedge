@@ -293,8 +293,8 @@ See `deploy/.env.example` for the full template with all variables documented.
 | `sealedge` | `crates/cli/src/main.rs` | Main envelope encryption CLI |
 | `sealedge-server` | `crates/core/src/bin/sealedge-server.rs` | Network server (TCP/QUIC transport) |
 | `sealedge-client` | `crates/core/src/bin/sealedge-client.rs` | Network client |
-| `sealedge-platform-server` | `crates/platform-server/src/main.rs` | Platform HTTP server (verify, verify-attestation, JWKS, health, verify page) |
-| `seal` | `crates/seal-cli/src/main.rs` | Archive + attestation CLI (keygen/wrap/verify/unwrap/emit-request/attest-sbom/verify-attestation) |
+| `sealedge-platform-server` | `crates/platform-server/src/main.rs` | Platform HTTP server (verify, verify-attestation, witness, JWKS, health, verify page) |
+| `seal` | `crates/seal-cli/src/main.rs` | Archive + attestation CLI (keygen/wrap/verify/verify-chronicle/witness/unwrap/emit-request/attest-sbom/verify-attestation) |
 
 ## Common Tasks
 

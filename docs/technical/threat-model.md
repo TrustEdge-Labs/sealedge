@@ -312,6 +312,35 @@ key sharing for auditing.
 
 ---
 
+### T14: Cross-Archive Integrity (Device Chronicle + Witness, H1)
+
+**Threat**: `.seal` archives are independent files, so wholesale deletion,
+reordering, or history-rewriting of a device's archives is invisible, and
+capture timestamps are self-asserted.
+
+**Mitigations**:
+- **Chronicle linkage**: each archive carries a signed, monotonic `sequence` and
+  a populated `prev_archive_hash` (BLAKE3 of the previous manifest's canonical
+  bytes). `seal verify-chronicle` detects mid-chain deletion (sequence gaps),
+  reordering, and tampering (broken links) offline, given the chain.
+- **Witness receipt**: `POST /v1/witness` records a device-signed chronicle tip in
+  an append-only, monotonic per-device ledger (primary key `(device_pub,
+  sequence)`; forks and rollbacks are rejected `409`) and returns a JWS bearing a
+  **trusted `observed_at`** timestamp. This answers "when did this exist?" and is
+  the only way to detect **tail deletion** (dropping the newest archives):
+  `verify-chronicle --witness` fails when the local tip is behind the witnessed
+  tip. Without a durable (postgres) ledger the endpoint returns `503` rather than
+  fabricate durability.
+
+**Residual risk**:
+- Detection begins at the **first witness**: history rewritten before any tip was
+  ever witnessed is undetectable.
+- The witness is a timestamp + monotonicity authority, not a content authority. A
+  malicious platform can withhold service or shift its clock, and **cross-client
+  equivocation** (showing different logs to different verifiers) is not prevented
+  — that needs a Merkle transparency log with gossiped consistency proofs, which
+  is explicitly out of scope (see `docs/designs/h1-device-chronicle.md` §9).
+
 ## RSA Vulnerability History
 
 This section documents the full lifecycle of RUSTSEC-2023-0071 (Marvin Attack) in Sealedge.

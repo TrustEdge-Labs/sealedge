@@ -73,6 +73,8 @@ Verifiers only need public keys and reject any archive whose `trst_version` is n
 | `keygen` | Generate a `SEALEDGE-KEY-V2` bundle and its `.pub` file |
 | `wrap` | Create a signed (and by default encrypted) `.seal` archive |
 | `verify` | Verify an archive using public keys only |
+| `verify-chronicle` | Verify a device's cross-archive chronicle (linkage + optional witness) |
+| `witness` | Submit the chronicle tip for a signed, timestamped platform witness receipt |
 | `unwrap` | Decrypt and recover the original data (recipient uses its own bundle) |
 | `emit-request` | Build a verification request JSON (optionally POST it to a platform) |
 | `attest-sbom` | Bind an SBOM to a binary as a signed point attestation |
@@ -81,8 +83,10 @@ Verifiers only need public keys and reject any archive whose `trst_version` is n
 Key flags (see `seal <command> --help` for the full list):
 
 - `keygen --out-key <p> --out-pub <p> [--unencrypted]`
-- `wrap --in <f> --out <dir.seal> [--device-key <k>] [--profile generic|cam.video|sensor|audio|log] [--recipient x25519:<b64>]... [--sign-only] [--unencrypted] [--backend software|yubikey] [--chunk-size N] [--seed N]` (plus profile-specific flags). Encrypted to the device key by default; if `--device-key` is omitted a `device.key`/`device.pub` pair is auto-generated. `--backend yubikey` requires `--sign-only`.
+- `wrap --in <f> --out <dir.seal> [--device-key <k>] [--profile generic|cam.video|sensor|audio|log] [--recipient x25519:<b64>]... [--sign-only] [--unencrypted] [--backend software|yubikey] [--chunk-size N] [--seed N] [--chronicle <state>] [--prev-archive <p> | --prev-hash <b3:> --prev-seq <n>]` (plus profile-specific flags). Encrypted to the device key by default; if `--device-key` is omitted a `device.key`/`device.pub` pair is auto-generated. `--backend yubikey` requires `--sign-only`.
 - `verify <archive> --device-pub <ed25519:...> [--json] [--emit-receipt <path>]`
+- `verify-chronicle <paths...> --device-pub <ed25519:...> [--witness <receipt>] [--witness-jwks <url|file>] [--json]`
+- `witness --chronicle <state> --device-key <k> [--post <url>] [--out <f>] [--unencrypted]`
 - `unwrap <archive> --device-key <recipient bundle> --out <path> [--device-pub <signer pin>] [--unencrypted]`
 - `emit-request --archive <dir> --device-pub <.pub> --out <json> [--post <url>]`
 - `attest-sbom --binary <f> --sbom <f> --device-key <k> --device-pub <k> [--out <f>] [--unencrypted]`
@@ -99,6 +103,7 @@ the result (also documented in [docs/user/cli.md](../../docs/user/cli.md)):
 | `10` | Signature verification failed |
 | `11` | Continuity / integrity chain verification failed |
 | `12` | Archive read, schema, or IO error (bad archive, missing chunk, unsupported `trst_version`) |
+| `13` | Chronicle linkage / contiguity failure (`verify-chronicle`) |
 | `14` | Internal canonicalization error |
 | `1`  | Other error |
 

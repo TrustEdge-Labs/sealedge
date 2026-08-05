@@ -16,6 +16,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — H1 device chronicle (cross-archive continuity)
+
+- **Chronicle linkage.** `.seal` archives can form a per-device, hash-linked,
+  sequence-numbered chain: `seal wrap --chronicle <state>` populates the signed
+  `sequence` + `prev_archive_hash` and advances a local head pointer (or use
+  `--prev-archive` / `--prev-hash`+`--prev-seq`). Additive within `trst_version`
+  0.2.0 — standalone archives are byte-identical to before.
+- **`seal verify-chronicle`.** Verifies a device's chain: per-archive signature +
+  continuity, single-signer, contiguity (detects gaps / reordering), and hash
+  linkage. Exit code `13` on a chronicle failure.
+- **Platform witness (`POST /v1/witness`) + `seal witness`.** A device submits its
+  signed chronicle tip; the platform records it in an append-only, monotonic
+  per-device ledger (forks / rollbacks → `409`) and returns a JWS witness receipt
+  with a trusted timestamp. `seal verify-chronicle --witness` cross-checks the
+  local tip against a receipt and detects **tail deletion**. Without the
+  `postgres` feature the endpoint returns `503` rather than fake durability.
+- Threat model **T14** (cross-archive integrity). Key rotation / revocation /
+  key-epoch are designed (`docs/designs/h1-device-chronicle.md` §8) for a later
+  phase.
+
 ### Security (external review — Criticals C1–C4)
 
 - **C1 — Platform `/v1/verify` now verifies real `.seal` archives.** Fixed a double
