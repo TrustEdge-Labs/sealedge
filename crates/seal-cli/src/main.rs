@@ -1826,7 +1826,17 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
             format!("Failed to read witness receipt: {}", receipt_path.display())
         })?;
         let jwks = load_jwks(args.witness_jwks.as_deref()).await?;
-        let (w_seq, w_tip) = verify_witness_receipt_jws(&token, &jwks)?;
+        let (w_dev, w_seq, w_tip) = verify_witness_receipt_jws(&token, &jwks)?;
+        // The receipt must be for THIS chain's signer, or it's meaningless here.
+        if w_dev != device_pub {
+            return Err(CliExitError {
+                code: 13,
+                message: format!(
+                    "witness receipt is for device {w_dev}, not the chain's signer {device_pub}"
+                ),
+            }
+            .into());
+        }
         if tip_seq < w_seq {
             return Err(CliExitError {
                 code: 13,
@@ -1905,7 +1915,7 @@ async fn load_jwks(source: Option<&str>) -> Result<String> {
 /// check (no jsonwebtoken dependency in the CLI): the JWKS `x` and the JWS
 /// signature are base64url — re-encode them into the `ed25519:<base64>` form
 /// the core verifier expects.
-fn verify_witness_receipt_jws(token: &str, jwks_json: &str) -> Result<(u64, String)> {
+fn verify_witness_receipt_jws(token: &str, jwks_json: &str) -> Result<(String, u64, String)> {
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
     let parts: Vec<&str> = token.trim().split('.').collect();
@@ -1944,7 +1954,21 @@ fn verify_witness_receipt_jws(token: &str, jwks_json: &str) -> Result<(u64, Stri
 
     let payload: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)
         .with_context(|| "Failed to decode JWS payload")?;
+    // Defense-in-depth: reject a non-witness JWS (e.g. a verification receipt).
+    if let Some(typ) = payload.get("typ").and_then(|t| t.as_str()) {
+        if typ != "witness" {
+            anyhow::bail!("receipt 'typ' is '{typ}', expected 'witness'");
+        }
+    }
     let body = payload.get("witness").unwrap_or(&payload);
+    // Bind the receipt to a device: prefer the receipt body's device_pub, then
+    // the JWS `sub`. The caller checks this equals the chain's signer.
+    let device_pub = body
+        .get("device_pub")
+        .and_then(|d| d.as_str())
+        .or_else(|| payload.get("sub").and_then(|s| s.as_str()))
+        .ok_or_else(|| anyhow::anyhow!("witness receipt missing device identity (device_pub/sub)"))?
+        .to_string();
     let seq = body
         .get("sequence")
         .and_then(|s| s.as_u64())
@@ -1954,7 +1978,7 @@ fn verify_witness_receipt_jws(token: &str, jwks_json: &str) -> Result<(u64, Stri
         .and_then(|s| s.as_str())
         .ok_or_else(|| anyhow::anyhow!("witness receipt missing 'tip'"))?
         .to_string();
-    Ok((seq, tip))
+    Ok((device_pub, seq, tip))
 }
 
 async fn handle_witness(args: WitnessCmd) -> Result<()> {

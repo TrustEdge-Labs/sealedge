@@ -375,3 +375,75 @@ async fn test_verify_unknown_fields_returns_400() {
 
     assert_eq!(response.status_code(), 400);
 }
+
+// ─── H1 witness endpoint (POST /v1/witness) — require a live PostgreSQL ────────
+
+/// Accept a genesis tip, idempotently replay it, and reject a fork at the same
+/// sequence (409). Exercises the full handler: signature check, registry lookup,
+/// monotonic ledger insert, and JWS issuance.
+#[tokio::test]
+#[ignore]
+async fn test_witness_records_and_rejects_fork() {
+    let (pool, _org_id, _token) = setup_test_db().await;
+    let server = TestServer::new(create_test_app(pool)).unwrap();
+
+    let kp = sealedge_core::DeviceKeypair::generate().unwrap();
+    let signed_at = "2026-08-05T00:00:00Z";
+
+    let r0 = sealedge_core::WitnessRequest::create_signed(&kp, 0, "b3:aaa", signed_at).unwrap();
+    let resp = server.post("/v1/witness").json(&r0).await;
+    assert_eq!(resp.status_code(), 200);
+    assert!(resp.json::<serde_json::Value>()["jws"].as_str().is_some());
+
+    // Exact replay is idempotent.
+    let resp = server.post("/v1/witness").json(&r0).await;
+    assert_eq!(resp.status_code(), 200);
+
+    // Same sequence, different tip → fork.
+    let fork = sealedge_core::WitnessRequest::create_signed(&kp, 0, "b3:bbb", signed_at).unwrap();
+    let resp = server.post("/v1/witness").json(&fork).await;
+    assert_eq!(resp.status_code(), 409);
+}
+
+/// Reject a sequence at or below the ledger max that isn't an exact replay
+/// (rollback → 409). Gaps above the max are allowed.
+#[tokio::test]
+#[ignore]
+async fn test_witness_rejects_rollback() {
+    let (pool, _org_id, _token) = setup_test_db().await;
+    let server = TestServer::new(create_test_app(pool)).unwrap();
+
+    let kp = sealedge_core::DeviceKeypair::generate().unwrap();
+    let signed_at = "2026-08-05T00:00:00Z";
+
+    // Record sequence 2 (a gap above genesis is fine).
+    let r2 = sealedge_core::WitnessRequest::create_signed(&kp, 2, "b3:ccc", signed_at).unwrap();
+    assert_eq!(
+        server.post("/v1/witness").json(&r2).await.status_code(),
+        200
+    );
+
+    // Backfilling sequence 1 below the max is a rollback.
+    let r1 = sealedge_core::WitnessRequest::create_signed(&kp, 1, "b3:bbb", signed_at).unwrap();
+    assert_eq!(
+        server.post("/v1/witness").json(&r1).await.status_code(),
+        409
+    );
+}
+
+/// A request whose signature does not match its contents is rejected (401).
+#[tokio::test]
+#[ignore]
+async fn test_witness_rejects_bad_signature() {
+    let (pool, _org_id, _token) = setup_test_db().await;
+    let server = TestServer::new(create_test_app(pool)).unwrap();
+
+    let kp = sealedge_core::DeviceKeypair::generate().unwrap();
+    let mut req =
+        sealedge_core::WitnessRequest::create_signed(&kp, 0, "b3:aaa", "2026-08-05T00:00:00Z")
+            .unwrap();
+    // Tamper the tip after signing — the signature no longer matches.
+    req.tip = "b3:tampered".to_string();
+    let resp = server.post("/v1/witness").json(&req).await;
+    assert_eq!(resp.status_code(), 401);
+}

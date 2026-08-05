@@ -235,7 +235,7 @@ fn prev_hash_requires_prev_seq() {
 /// Build a witness receipt JWS (as the platform would) plus a JWKS carrying the
 /// signing key, so the CLI's `--witness` cross-check can be exercised without a
 /// live platform. Returns `(jws_token, jwks_json)`.
-fn make_witness_jws(sequence: u64, tip: &str) -> (String, String) {
+fn make_witness_jws(device_pub: &str, sequence: u64, tip: &str) -> (String, String) {
     use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
     use base64::Engine as _;
 
@@ -244,9 +244,9 @@ fn make_witness_jws(sequence: u64, tip: &str) -> (String, String) {
     let header = serde_json::json!({ "alg": "EdDSA", "kid": "k1", "typ": "JWT" });
     let payload = serde_json::json!({
         "iss": "sealedge-verify-service",
-        "sub": kp.public,
+        "sub": device_pub,
         "typ": "witness",
-        "witness": { "sequence": sequence, "tip": tip },
+        "witness": { "device_pub": device_pub, "sequence": sequence, "tip": tip },
     });
     let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
     let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
@@ -282,7 +282,7 @@ fn witness_crosscheck_passes_when_tip_matches() {
     let seq = state["sequence"].as_u64().unwrap();
     let tip = state["tip"].as_str().unwrap();
 
-    let (token, jwks) = make_witness_jws(seq, tip);
+    let (token, jwks) = make_witness_jws(&ed, seq, tip);
     let rp = dir.path().join("receipt.jws");
     let jp = dir.path().join("jwks.json");
     fs::write(&rp, &token).unwrap();
@@ -319,7 +319,7 @@ fn witness_crosscheck_detects_tail_deletion() {
 
     // The witness has seen a HIGHER sequence than the local chain — the tail was
     // deleted. Cross-check must fail with exit 13.
-    let (token, jwks) = make_witness_jws(seq + 1, &format!("b3:{}", "f".repeat(64)));
+    let (token, jwks) = make_witness_jws(&ed, seq + 1, &format!("b3:{}", "f".repeat(64)));
     let rp = dir.path().join("receipt.jws");
     let jp = dir.path().join("jwks.json");
     fs::write(&rp, &token).unwrap();
@@ -330,6 +330,44 @@ fn witness_crosscheck_detects_tail_deletion() {
             "verify-chronicle",
             a0.to_str().unwrap(),
             a1.to_str().unwrap(),
+            "--device-pub",
+            &ed,
+            "--witness",
+            rp.to_str().unwrap(),
+            "--witness-jwks",
+            jp.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(13);
+}
+
+#[test]
+fn witness_crosscheck_rejects_receipt_for_other_device() {
+    let dir = TempDir::new().unwrap();
+    let ed = keygen(dir.path(), "device");
+    let other_ed = keygen(dir.path(), "other");
+    let key = dir.path().join("device.key");
+    let chronicle = dir.path().join("device.chronicle");
+    let a0 = wrap_chronicle(dir.path(), &key, &chronicle, "clip0", b"p0");
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&chronicle).unwrap()).unwrap();
+    let seq = state["sequence"].as_u64().unwrap();
+    let tip = state["tip"].as_str().unwrap();
+
+    // A validly-signed receipt, but for a DIFFERENT device — must be rejected
+    // (fail-loud, not vacuously passed).
+    let (token, jwks) = make_witness_jws(&other_ed, seq, tip);
+    let rp = dir.path().join("receipt.jws");
+    let jp = dir.path().join("jwks.json");
+    fs::write(&rp, &token).unwrap();
+    fs::write(&jp, &jwks).unwrap();
+
+    seal()
+        .args([
+            "verify-chronicle",
+            a0.to_str().unwrap(),
             "--device-pub",
             &ed,
             "--witness",

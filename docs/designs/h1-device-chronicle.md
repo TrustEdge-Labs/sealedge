@@ -482,8 +482,14 @@ forward-compatible subset, so clients written against the MVP keep working.
 - **H1.4 — platform.** `/v1/witness` (verify, **registry-bind by public key
   (A2)**, monotonic insert, trusted timestamp, JWS receipt); `witness_log`
   (postgres) + tests-only in-memory; **server `503`s without postgres (A5)**.
-  Integration tests: accept, idempotent replay, fork `409`, rollback `409`,
-  `503`-without-postgres, receipt verifies against JWKS.
+  Tests: the ledger `decide()` logic and JWS issuance (sign → verify against the
+  served JWKS + claims shape) are **CI-runnable** unit tests (`--lib`). The
+  full-handler HTTP integration tests (accept, idempotent replay, fork `409`,
+  rollback `409`, bad-signature `401`) live in `platform_integration.rs` and — per
+  the platform test convention — are **`#[ignore]` and require a live PostgreSQL**
+  (`TEST_DATABASE_URL`, run with `--features "http,postgres,test-utils" --
+  --include-ignored`); **CI does not build or run the `postgres` feature**, so
+  these are exercised manually / in a DB-enabled environment.
 - **H1.5 — docs + threat model.** Add **T14** (§11), update CLAUDE.md,
   format/protocol docs, **add exit `13` to `crates/seal-cli/README.md` (OQ6)**,
   CHANGELOG.
