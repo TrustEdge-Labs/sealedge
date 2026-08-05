@@ -21,13 +21,14 @@ use clap::{Args, Parser, Subcommand};
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use sealedge_core::{
-    cek_wrap_info, chain_next, chunk_aad_v2, decrypt_segment, encrypt_segment, genesis,
-    hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng, is_encrypted_key_file, read_archive,
-    recipient_id, seeded_test_rng, segment_hash, sign_manifest, validate_archive, verify_manifest,
-    write_archive, AudioMetadata, CamVideoMetadata, ChunkInfo, ContentKey, DeviceBundle,
-    DeviceInfo, DeviceKeypair, EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata,
-    PointAttestation, ProfileMetadata, RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest,
-    CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
+    archive_digest, cek_wrap_info, chain_next, chunk_aad_v2, decrypt_segment, encrypt_segment,
+    format_archive_id, genesis, hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng,
+    is_encrypted_key_file, read_archive, recipient_id, seeded_test_rng, segment_hash,
+    sign_manifest, validate_archive, verify_manifest, write_archive, AudioMetadata,
+    CamVideoMetadata, ChronicleState, ChunkInfo, ContentKey, DeviceBundle, DeviceInfo,
+    DeviceKeypair, EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata, PointAttestation,
+    ProfileMetadata, RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest, CONTENT_AEAD_ID,
+    HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
 };
 use serde::Serialize;
 use std::time::Instant;
@@ -95,6 +96,8 @@ struct VerifyReport {
     first_gap_index: Option<u32>, // Index of first continuity gap
     #[serde(skip_serializing_if = "Option::is_none")]
     out_of_order: Option<bool>, // Whether segments are out of order
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chronicle_sequence: Option<u64>, // This archive's chronicle position (if any)
 }
 
 #[derive(Parser, Debug)]
@@ -109,6 +112,7 @@ struct Cli {
 enum Commands {
     Wrap(WrapCmd),
     Verify(VerifyCmd),
+    VerifyChronicle(VerifyChronicleCmd),
     Unwrap(UnwrapCmd),
     EmitRequest(EmitRequestCmd),
     Keygen(KeygenCmd),
@@ -221,6 +225,19 @@ struct WrapCmd {
     /// Produce a signed-but-unencrypted archive (plaintext chunks, no CEK).
     #[arg(long = "sign-only")]
     sign_only: bool,
+    /// Chronicle state file to read and advance (the device's head pointer). An
+    /// absent file starts a new chronicle at sequence 0 (genesis).
+    #[arg(long = "chronicle", value_name = "PATH")]
+    chronicle: Option<PathBuf>,
+    /// Link onto a specific previous archive (derives its digest + sequence).
+    #[arg(long = "prev-archive", value_name = "PATH")]
+    prev_archive: Option<PathBuf>,
+    /// Explicit previous archive digest ("b3:<hex>"); requires --prev-seq.
+    #[arg(long = "prev-hash", value_name = "B3")]
+    prev_hash: Option<String>,
+    /// Sequence of the previous archive (used with --prev-hash).
+    #[arg(long = "prev-seq", value_name = "N")]
+    prev_seq: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -241,6 +258,21 @@ struct VerifyCmd {
         help = "Write JSON verification receipt to file"
     )]
     emit_receipt: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct VerifyChronicleCmd {
+    /// One or more `.seal` archives, or a directory containing them.
+    #[arg(value_name = "PATHS", required = true, num_args = 1..)]
+    paths: Vec<PathBuf>,
+    #[arg(
+        long = "device-pub",
+        value_name = "KEY",
+        help = "Expected signer public key (ed25519:<base64>)"
+    )]
+    device_pub: String,
+    #[arg(long, help = "Output results as JSON")]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -422,6 +454,7 @@ async fn run() -> Result<()> {
     match cli.command {
         Commands::Wrap(args) => handle_wrap(args),
         Commands::Verify(args) => handle_verify(args),
+        Commands::VerifyChronicle(args) => handle_verify_chronicle(args),
         Commands::Unwrap(args) => handle_unwrap(args),
         Commands::EmitRequest(args) => handle_emit_request(args).await,
         Commands::Keygen(args) => handle_keygen(args),
@@ -949,6 +982,21 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         signature: None,
     };
 
+    // H1: resolve chronicle linkage and set it BEFORE the HPKE wrap + signing —
+    // sequence and prev_archive_hash are inside the signed canonical bytes (and
+    // the pre-encryption digest the CEK is bound to).
+    let chronicle_link = resolve_chronicle(
+        args.chronicle.as_deref(),
+        args.prev_archive.as_deref(),
+        args.prev_hash.as_deref(),
+        args.prev_seq,
+        &signing_public_key,
+    )?;
+    if let Some(ref link) = chronicle_link {
+        manifest.sequence = Some(link.sequence);
+        manifest.prev_archive_hash = link.prev.clone();
+    }
+
     // Encrypted mode: HPKE-wrap the CEK to each recipient. The HPKE aad binds
     // each wrapped CEK to the manifest-without-encryption digest, so a wrapped
     // CEK cannot be transplanted onto a different manifest (design §7).
@@ -1034,6 +1082,23 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
     let detached_sig = signature.as_bytes();
     write_archive(&args.output, &manifest, encrypted_chunks, detached_sig)?;
 
+    // H1: advance the chronicle head pointer (the tip is the digest of the
+    // signed manifest we just wrote).
+    if let Some(link) = chronicle_link.as_ref() {
+        if let Some(state_path) = link.state_path.as_ref() {
+            let tip = format_archive_id(&archive_digest(&manifest)?);
+            let state = ChronicleState {
+                device_pub: signing_public_key.clone(),
+                sequence: link.sequence,
+                tip,
+                updated_at: current_timestamp()?,
+            };
+            state.save(state_path).with_context(|| {
+                format!("Failed to update chronicle state: {}", state_path.display())
+            })?;
+        }
+    }
+
     let result = WrapResult {
         output_dir: args.output,
         signature,
@@ -1118,6 +1183,7 @@ fn handle_verify(args: VerifyCmd) -> Result<()> {
     report.profile = manifest.profile.clone();
     report.device_id = manifest.device.id.clone();
     report.segments = manifest.segments.len() as u32;
+    report.chronicle_sequence = manifest.sequence;
     report.duration_s = manifest
         .segments
         .iter()
@@ -1382,6 +1448,12 @@ fn output_success(args: &VerifyCmd, report: &VerifyReport) -> Result<()> {
     } else {
         println!("Signature: PASS");
         println!("Continuity: PASS");
+        if let Some(seq) = report.chronicle_sequence {
+            println!(
+                "Chronicle: position {} (linkage unverified — use `seal verify-chronicle`)",
+                seq
+            );
+        }
         println!(
             "Segments: {}  Duration(s): {:.1}  Chunk(s): {:.1}",
             report.segments,
@@ -1458,6 +1530,272 @@ fn output_continuity_error(args: &VerifyCmd, report: &VerifyReport) -> Result<()
 
 // Removed: extract_gap_index() function eliminated string parsing
 // Gap index information should come from structured error types, not string parsing
+
+/// A resolved chronicle link for `wrap`: the sequence to write, the optional
+/// predecessor digest, and the state file to advance (if any).
+struct ChronicleLink {
+    sequence: u64,
+    prev: Option<String>,
+    state_path: Option<PathBuf>,
+}
+
+/// Resolve chronicle linkage from the wrap flags (design §5). `None` = a
+/// standalone (non-chronicle) archive.
+fn resolve_chronicle(
+    chronicle: Option<&Path>,
+    prev_archive: Option<&Path>,
+    prev_hash: Option<&str>,
+    prev_seq: Option<u64>,
+    signing_public_key: &str,
+) -> Result<Option<ChronicleLink>> {
+    if let Some(prev_path) = prev_archive {
+        let (m, _chunks) = read_archive(prev_path)
+            .with_context(|| format!("Failed to read --prev-archive: {}", prev_path.display()))?;
+        let prev_seq = m.sequence.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--prev-archive points at a non-chronicle archive (no sequence); \
+                 start a chronicle with --chronicle or supply --prev-hash/--prev-seq"
+            )
+        })?;
+        return Ok(Some(ChronicleLink {
+            sequence: prev_seq + 1,
+            prev: Some(format_archive_id(&archive_digest(&m)?)),
+            state_path: chronicle.map(|p| p.to_path_buf()),
+        }));
+    }
+
+    match (prev_hash, prev_seq) {
+        (Some(hash), Some(seq)) => {
+            validate_prev_hash(hash)?;
+            return Ok(Some(ChronicleLink {
+                sequence: seq + 1,
+                prev: Some(hash.to_string()),
+                state_path: chronicle.map(|p| p.to_path_buf()),
+            }));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("--prev-hash and --prev-seq must be supplied together");
+        }
+        (None, None) => {}
+    }
+
+    if let Some(path) = chronicle {
+        if path.exists() {
+            let st = ChronicleState::load(path)
+                .with_context(|| format!("Failed to read chronicle state: {}", path.display()))?;
+            if st.device_pub != signing_public_key {
+                anyhow::bail!(
+                    "chronicle state belongs to device {} but wrap is signing with {}",
+                    st.device_pub,
+                    signing_public_key
+                );
+            }
+            return Ok(Some(ChronicleLink {
+                sequence: st.sequence + 1,
+                prev: Some(st.tip),
+                state_path: Some(path.to_path_buf()),
+            }));
+        }
+        // No state file yet: genesis.
+        return Ok(Some(ChronicleLink {
+            sequence: 0,
+            prev: None,
+            state_path: Some(path.to_path_buf()),
+        }));
+    }
+
+    Ok(None)
+}
+
+fn validate_prev_hash(h: &str) -> Result<()> {
+    let ok = h
+        .strip_prefix("b3:")
+        .map(|x| x.len() == 64 && x.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap_or(false);
+    if !ok {
+        anyhow::bail!("--prev-hash must be 'b3:<64 hex>'");
+    }
+    Ok(())
+}
+
+/// Expand verify-chronicle path args into archive directories: a path holding a
+/// `manifest.json` is an archive; a plain directory is scanned for immediate
+/// archive children.
+fn collect_archive_dirs(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for p in paths {
+        if p.join("manifest.json").is_file() {
+            dirs.push(p.clone());
+        } else if p.is_dir() {
+            let mut children: Vec<PathBuf> = fs::read_dir(p)
+                .with_context(|| format!("Failed to read directory: {}", p.display()))?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|c| c.join("manifest.json").is_file())
+                .collect();
+            children.sort();
+            dirs.append(&mut children);
+        } else {
+            anyhow::bail!("not a .seal archive or directory: {}", p.display());
+        }
+    }
+    Ok(dirs)
+}
+
+fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
+    let device_pub =
+        if args.device_pub.starts_with("ed25519:") || args.device_pub.starts_with("ecdsa-p256:") {
+            args.device_pub.clone()
+        } else {
+            format!("ed25519:{}", args.device_pub)
+        };
+
+    let archive_dirs = collect_archive_dirs(&args.paths)?;
+    if archive_dirs.is_empty() {
+        return Err(CliExitError {
+            code: 12,
+            message: "No .seal archives found in the given paths".to_string(),
+        }
+        .into());
+    }
+
+    struct Entry {
+        seq: u64,
+        digest: [u8; 32],
+        prev: Option<String>,
+        path: PathBuf,
+    }
+    let mut entries: Vec<Entry> = Vec::with_capacity(archive_dirs.len());
+
+    for dir in &archive_dirs {
+        let (manifest, _chunks) = read_archive(dir).map_err(|e| CliExitError {
+            code: 12,
+            message: format!("{}: archive read failed: {}", dir.display(), e),
+        })?;
+        require_supported_version(&manifest.trst_version).map_err(|e| CliExitError {
+            code: 12,
+            message: format!("{}: {}", dir.display(), e),
+        })?;
+        if manifest.device.public_key != device_pub {
+            return Err(CliExitError {
+                code: 10,
+                message: format!(
+                    "{}: signed by {}, expected {}",
+                    dir.display(),
+                    manifest.device.public_key,
+                    device_pub
+                ),
+            }
+            .into());
+        }
+        let sig = manifest.signature.as_ref().ok_or_else(|| CliExitError {
+            code: 12,
+            message: format!("{}: manifest missing signature", dir.display()),
+        })?;
+        let canonical = manifest.to_canonical_bytes()?;
+        let sig_ok = verify_manifest(&device_pub, &canonical, sig).map_err(|e| CliExitError {
+            code: 10,
+            message: format!("{}: signature error: {}", dir.display(), e),
+        })?;
+        if !sig_ok {
+            return Err(CliExitError {
+                code: 10,
+                message: format!("{}: signature verification failed", dir.display()),
+            }
+            .into());
+        }
+        validate_archive(dir).map_err(|e| CliExitError {
+            code: 11,
+            message: format!("{}: continuity failed: {}", dir.display(), e),
+        })?;
+        let seq = manifest.sequence.ok_or_else(|| CliExitError {
+            code: 13,
+            message: format!("{}: not a chronicle archive (no sequence)", dir.display()),
+        })?;
+        entries.push(Entry {
+            seq,
+            digest: archive_digest(&manifest)?,
+            prev: manifest.prev_archive_hash.clone(),
+            path: dir.clone(),
+        });
+    }
+
+    entries.sort_by_key(|e| e.seq);
+
+    // Contiguity: sequences must be 0,1,..,N with no gaps or duplicates.
+    for (i, e) in entries.iter().enumerate() {
+        if e.seq != i as u64 {
+            return Err(CliExitError {
+                code: 13,
+                message: format!(
+                    "chronicle gap/disorder: expected sequence {}, found {} ({})",
+                    i,
+                    e.seq,
+                    e.path.display()
+                ),
+            }
+            .into());
+        }
+    }
+
+    // Genesis must have no predecessor.
+    if let Some(prev) = &entries[0].prev {
+        return Err(CliExitError {
+            code: 13,
+            message: format!("genesis (sequence 0) must not set prev_archive_hash ({prev})"),
+        }
+        .into());
+    }
+
+    // Linkage: each archive points at the previous one's digest.
+    for k in 1..entries.len() {
+        let expected = format_archive_id(&entries[k - 1].digest);
+        match &entries[k].prev {
+            Some(p) if *p == expected => {}
+            Some(p) => {
+                return Err(CliExitError {
+                    code: 13,
+                    message: format!(
+                        "broken chronicle link at sequence {}: prev={}, expected={}",
+                        entries[k].seq, p, expected
+                    ),
+                }
+                .into())
+            }
+            None => {
+                return Err(CliExitError {
+                    code: 13,
+                    message: format!("missing prev_archive_hash at sequence {}", entries[k].seq),
+                }
+                .into())
+            }
+        }
+    }
+
+    let last = entries
+        .last()
+        .expect("entries is non-empty (checked above)");
+    let tip = format_archive_id(&last.digest);
+    let tip_seq = last.seq;
+
+    if args.json {
+        let out = serde_json::json!({
+            "chronicle": "pass",
+            "device_pub": device_pub,
+            "count": entries.len(),
+            "first_sequence": 0,
+            "tip_sequence": tip_seq,
+            "tip": tip,
+        });
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        println!("Chronicle: PASS");
+        println!("Device: {device_pub}");
+        println!("Archives: {} (sequence 0..{})", entries.len(), tip_seq);
+        println!("Tip: {tip} @ sequence {tip_seq}");
+    }
+
+    Ok(())
+}
 
 fn current_timestamp() -> Result<String> {
     let now: DateTime<Utc> = Utc::now();
