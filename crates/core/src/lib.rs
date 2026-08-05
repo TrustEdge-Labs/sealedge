@@ -97,6 +97,7 @@ pub mod audio;
 pub mod auth;
 pub mod backends;
 pub mod chain;
+pub mod chronicle;
 pub mod crypto;
 pub mod envelope;
 pub mod error;
@@ -153,6 +154,7 @@ pub use backends::{KeyringBackend, UniversalKeyringBackend};
 pub use chain::{
     blake3_hex_or_b64, chain_next, genesis, segment_hash, validate_chain, ChainError, ChainSegment,
 };
+pub use chronicle::{archive_digest, format_archive_id, ChronicleState, WitnessRequest};
 pub use crypto::{
     decrypt_segment, derive_chunk_key, encrypt_segment, format_nonce, generate_aad,
     generate_nonce24, is_encrypted_key_file, parse_nonce, sign_manifest, verify_manifest,
