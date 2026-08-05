@@ -18,6 +18,9 @@ Complete command-line interface documentation for Sealedge, covering both the co
   - [seal keygen - Generate Key Pair](#seal-keygen---generate-key-pair)
   - [seal wrap - Create Archives](#seal-wrap---create-archives)
   - [seal verify - Verify Archives](#seal-verify---verify-archives)
+  - [seal verify-chronicle - Verify Device Chronicle](#seal-verify-chronicle---verify-device-chronicle)
+  - [seal witness - Request a Witness Receipt](#seal-witness---request-a-witness-receipt)
+  - [seal rekey - Rotate Signing Identity](#seal-rekey---rotate-signing-identity)
   - [seal unwrap - Decrypt Archives](#seal-unwrap---decrypt-archives)
   - [seal emit-request - Submit for Verification](#seal-emit-request---submit-for-verification)
 - [Encrypted Key Files](#encrypted-key-files)
@@ -33,7 +36,7 @@ Complete command-line interface documentation for Sealedge, covering both the co
 
 Sealedge provides two complementary CLI tools:
 
-1. **`seal`** - Archive + attestation CLI (keygen, wrap, verify, unwrap, emit-request, attest-sbom, verify-attestation)
+1. **`seal`** - Archive + attestation CLI (keygen, wrap, verify, verify-chronicle, witness, rekey, unwrap, emit-request, attest-sbom, verify-attestation)
 2. **`sealedge`** - Core envelope encryption and network operations
 
 Both tools are built after running `cargo build --workspace --release`.
@@ -190,6 +193,24 @@ seal wrap --in <INPUT> --out <OUTPUT> [OPTIONS]
 | `--slot <SLOT>` | `9c` | YubiKey PIV slot (yubikey backend) | `--slot 9c` |
 | `--seed <U64>` | - | Seed the RNG for deterministic output (testing/CI; not secure) | `--seed 42` |
 
+#### Chronicle options (linking archives over time)
+
+By default each archive is a standalone island. These flags instead make an
+archive an entry in a device **chronicle** — an append-only, hash-linked,
+sequence-numbered chain — so deletion and reordering across archives become
+detectable (see [`seal verify-chronicle`](#seal-verify-chronicle---verify-device-chronicle)).
+
+| Option | Description |
+|--------|-------------|
+| `--chronicle <PATH>` | Read and advance a chronicle state file (the device's head pointer). An absent file starts a new chronicle at sequence 0 (genesis). After writing, the state is atomically updated to the new tip |
+| `--prev-archive <PATH>` | Link onto a specific previous `.seal` (derives its digest and `sequence + 1`) |
+| `--prev-hash <B3>` | Explicit previous archive digest (`b3:<hex>`); requires `--prev-seq` |
+| `--prev-seq <N>` | Sequence of the previous archive (used with `--prev-hash`); the new archive is `seq N+1` |
+
+A chronicle archive carries `sequence` and `prev_archive_hash` in its signed
+manifest, plus `device.key_epoch` — the monotonic per-identity key epoch (`0` at
+genesis, incremented by [`seal rekey`](#seal-rekey---rotate-signing-identity)).
+
 #### Profile-specific flags
 
 | Profile | Flags |
@@ -264,6 +285,14 @@ A V2 `.pub` file has two lines, so pass the Ed25519 line explicitly rather than
 2. **Signature Verification** - Ed25519/ECDSA-P256 signature validation against the canonical manifest
 3. **Continuity + Integrity** - BLAKE3 chunk hashes and continuity chain validation
 
+A chronicle archive additionally carries `sequence`, `prev_archive_hash`, and
+`device.key_epoch` (the monotonic per-identity key epoch — `0` at genesis,
+incremented by [`seal rekey`](#seal-rekey---rotate-signing-identity)).
+Single-archive `verify` reports the archive's chronicle position but **cannot**
+prove linkage; use
+[`seal verify-chronicle`](#seal-verify-chronicle---verify-device-chronicle) with
+the full chain for that.
+
 #### Exit Codes
 
 | Code | Meaning |
@@ -272,6 +301,7 @@ A V2 `.pub` file has two lines, so pass the Ed25519 line explicitly rather than
 | `10` | Signature verification failed |
 | `11` | Continuity chain verification failed |
 | `12` | Integrity / schema / IO error (bad archive, missing chunk, unsupported version) |
+| `13` | Chronicle linkage / contiguity / epoch / authorization failure ([`verify-chronicle`](#seal-verify-chronicle---verify-device-chronicle) only) |
 | `14` | Internal canonicalization error |
 | `1` | General error |
 
@@ -293,6 +323,161 @@ seal verify evidence.seal \
 Signature: PASS
 Continuity: PASS
 Segments: 16  Duration(s): 32.0  Chunk(s): 2.0
+```
+
+### seal verify-chronicle - Verify Device Chronicle
+
+`seal verify` proves that a single archive is authentic, but it cannot prove how
+a device's archives relate to one another. `seal verify-chronicle` verifies a
+**chronicle** — the per-device, append-only, hash-linked, sequence-numbered chain
+of archives (and rotation entries) produced by
+[`seal wrap --chronicle`](#seal-wrap---create-archives) and
+[`seal rekey`](#seal-rekey---rotate-signing-identity). It detects mid-chain
+deletion, reordering, and forks **offline**, and — with a witness receipt — tail
+deletion.
+
+```bash
+seal verify-chronicle <PATHS...> --device-pub <ed25519:...> \
+  [--witness <RECEIPT>] [--witness-jwks <URL|PATH>] [--json]
+```
+
+#### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `<PATHS...>` | One or more `.seal` archives, or a directory containing them (rotation entries are picked up automatically) |
+| `--device-pub <KEY>` | Expected **genesis** signer (`ed25519:<base64>`) — the identity at sequence 0. The active signer is walked forward across rotation entries, so pin the genesis key, **not** the current one |
+| `--witness <PATH>` | Platform witness receipt (JWS) to cross-check the local tip against (detects tail deletion). Requires `--witness-jwks` |
+| `--witness-jwks <URL\|PATH>` | Platform JWKS (URL or file path) used to verify the witness receipt |
+| `--json` | Emit the report as JSON to stdout |
+
+#### What It Checks
+
+1. **Per-entry signature + continuity** — every archive passes the same signature
+   and intra-archive continuity checks as `seal verify`.
+2. **Contiguity** — sequences run `0, 1, 2, …, N` with no gaps (a gap means a
+   mid-chain entry was deleted) and no duplicates (a duplicate `sequence` with a
+   different digest is a fork).
+3. **Hash linkage** — each entry's `prev_archive_hash` equals the BLAKE3 archive
+   digest of its predecessor.
+4. **Active-identity walk** — the chain begins under the genesis key; each
+   dual-signed rotation entry advances the active signer and `key_epoch` (the old
+   key authorizes, the new key proves possession). Every content archive must be
+   signed by the active identity for its position and carry the matching
+   `device.key_epoch`.
+5. **Witness cross-check (optional)** — verifies the receipt against the JWKS,
+   then requires the local tip to be at least as advanced as the witnessed tip. A
+   local chain that is **behind** the witnessed tip means the tail was deleted.
+
+#### Exit Codes
+
+Same scheme as [`seal verify`](#seal-verify---verify-archives), with `13` added
+for chronicle failures:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Chronicle verified |
+| `10` | Signature verification failed |
+| `11` | Continuity chain verification failed |
+| `12` | Archive read / schema / IO error |
+| `13` | Chronicle linkage, contiguity, epoch, or rotation-authorization failure |
+| `14` | Internal canonicalization error |
+| `1` | General error |
+
+#### Example Usage
+
+```bash
+# Verify a whole chronicle directory, pinning the genesis identity
+seal verify-chronicle ./chronicle/ --device-pub "$(grep '^ed25519:' genesis.pub)"
+
+# Explicit archives, JSON report
+seal verify-chronicle clip-000.seal clip-001.seal clip-002.seal \
+  --device-pub "$(grep '^ed25519:' genesis.pub)" --json
+
+# Cross-check the local tip against a platform witness receipt (detects tail deletion)
+seal verify-chronicle ./chronicle/ \
+  --device-pub "$(grep '^ed25519:' genesis.pub)" \
+  --witness receipt.json \
+  --witness-jwks http://localhost:3001/.well-known/jwks.json
+```
+
+### seal witness - Request a Witness Receipt
+
+Submit the chronicle tip to a platform for a signed, timestamped **witness
+receipt** — a JWS asserting "at `observed_at` I saw this device at
+`(sequence, tip)`, consistent with my append-only record." The receipt's
+**trusted timestamp** is what makes tail deletion and "when did this exist?"
+answerable; witness early and often, since detection only begins at the first
+witnessed tip.
+
+```bash
+seal witness --chronicle <STATE> --device-key <KEY> \
+  [--rotation <DIR>] [--post <URL>] [--out <PATH>] [--unencrypted]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--chronicle <PATH>` | Chronicle state file whose tip to witness |
+| `--device-key <PATH>` | Device key bundle that signs the witness request |
+| `--rotation <DIR>` | Rotation entry directory to attach when the tip being witnessed is a rotation (see [`seal rekey`](#seal-rekey---rotate-signing-identity)) — lets the platform verify it and record the device's `old → new` key lineage |
+| `--post <URL>` | Platform `/v1/witness` endpoint to submit to |
+| `--out <PATH>` | With `--post`: write the returned receipt. Without `--post`: write the signed request for offline submission (mirrors `emit-request`) |
+| `--unencrypted` | Read a plaintext key bundle without a passphrase prompt (CI/automation only) |
+
+```bash
+# Submit the current tip and save the returned receipt
+seal witness --chronicle device.chronicle --device-key device.key \
+  --post http://localhost:3001/v1/witness --out receipt.json
+
+# Emit a signed request only (no network), for offline submission
+seal witness --chronicle device.chronicle --device-key device.key --out request.json
+
+# Witness a chronicle whose tip is a rotation entry, so the platform records lineage
+seal witness --chronicle device.chronicle --device-key device2.key \
+  --rotation rotation-001.seal \
+  --post http://localhost:3001/v1/witness --out receipt.json
+```
+
+### seal rekey - Rotate Signing Identity
+
+Rotate a chronicle to a new signing identity. `rekey` appends a **rotation
+entry** — a dedicated chronicle entry, co-signed by the old key (which authorizes
+the successor) and the new key (which proves possession) — that advances the
+active identity and increments `device.key_epoch`. Later
+[`seal wrap --chronicle`](#seal-wrap---create-archives) archives are signed by the
+new key and stamped with the incremented epoch, and
+[`seal verify-chronicle`](#seal-verify-chronicle---verify-device-chronicle)
+follows the rotation without trusting any platform.
+
+```bash
+seal rekey --chronicle <STATE> --old-key <OLD> --new-key <NEW> --out <DIR.seal> [--unencrypted]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--chronicle <PATH>` | Chronicle state file to rotate and advance. Must already exist — run `seal wrap --chronicle` first (there is nothing to rotate on an empty chronicle) |
+| `--old-key <PATH>` | Current device key bundle; its signing key must match the chronicle's active signer. Authorizes the successor |
+| `--new-key <PATH>` | Pre-generated new `SEALEDGE-KEY-V2` bundle (run `seal keygen` first). Proves possession — `rekey` does **not** generate it |
+| `--out <PATH>` | Output directory for the rotation entry (contains `rotation.json`); place it in the chronicle alongside the `.seal` archives |
+| `--unencrypted` | Read plaintext key bundles without a passphrase prompt (CI/automation only) |
+
+The new key's epoch is always `old.key_epoch + 1`.
+
+```bash
+# 1. Generate the successor identity up front
+seal keygen --out-key device2.key --out-pub device2.pub
+
+# 2. Rotate the chronicle onto it (dual-signed rotation entry)
+seal rekey --chronicle device.chronicle \
+  --old-key device.key --new-key device2.key \
+  --out rotation-001.seal
+
+# 3. Subsequent archives are signed by the new key (key_epoch = 1)
+seal wrap --in next.bin --out clip-008.seal \
+  --device-key device2.key --chronicle device.chronicle
+
+# 4. Verify the whole chain — still pinned to the GENESIS key
+seal verify-chronicle ./chronicle/ --device-pub "$(grep '^ed25519:' device.pub)"
 ```
 
 ### seal unwrap - Decrypt Archives
