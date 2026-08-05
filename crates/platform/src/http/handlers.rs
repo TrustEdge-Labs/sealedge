@@ -527,6 +527,127 @@ pub async fn register_device_handler(
     }))
 }
 
+/// Witness response: the signed JWS witness receipt.
+#[cfg(feature = "postgres")]
+#[derive(serde::Serialize)]
+pub struct WitnessResponse {
+    pub jws: String,
+}
+
+/// POST /v1/witness — record a device-signed chronicle tip in the append-only
+/// ledger and return a signed witness receipt with a trusted timestamp (H1c).
+///
+/// No org bearer auth: the device's own Ed25519 signature over the request is the
+/// authorization. Registry binding is by public key (A2); monotonicity, forks,
+/// and rollbacks are decided by `witness::decide` and backstopped by the ledger
+/// primary key.
+#[cfg(feature = "postgres")]
+pub async fn witness_handler(
+    State(state): State<AppState>,
+    Json(req): Json<sealedge_core::WitnessRequest>,
+) -> Result<Json<WitnessResponse>, (StatusCode, String)> {
+    // 1. The device signature IS the authorization.
+    if !req.verify() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid witness request signature".to_string(),
+        ));
+    }
+
+    // 2. Registry binding by public key (A2) — honest-public-witness otherwise.
+    let device_registered = crate::database::get_device_by_pub(&state.db_pool, &req.device_pub)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "registry lookup failed".to_string(),
+            )
+        })?
+        .is_some();
+
+    // 3. Load the device's ledger and decide (pure, unit-tested logic).
+    let existing = crate::database::witness_entries(&state.db_pool, &req.device_pub)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "witness ledger read failed".to_string(),
+            )
+        })?;
+
+    let observed_now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (observed_at, prev) = match crate::witness::decide(&existing, req.sequence, &req.tip) {
+        crate::witness::WitnessDecision::Fork { existing_tip } => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "fork: sequence {} already witnessed with a different tip ({existing_tip})",
+                    req.sequence
+                ),
+            ));
+        }
+        crate::witness::WitnessDecision::Rollback { max_sequence } => {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "rollback: sequence {} is at or below the last witnessed sequence {max_sequence}",
+                    req.sequence
+                ),
+            ));
+        }
+        // Idempotent replay: re-issue bearing the ORIGINAL trusted timestamp.
+        crate::witness::WitnessDecision::Replay { existing, prev } => (existing.observed_at, prev),
+        crate::witness::WitnessDecision::Record { prev } => {
+            crate::database::witness_insert(
+                &state.db_pool,
+                &req.device_pub,
+                req.sequence,
+                &req.tip,
+                &observed_now,
+                device_registered,
+                &req.signed_at,
+            )
+            .await
+            .map_err(|e| {
+                // A concurrent request may have taken this (device_pub, sequence)
+                // first — the primary key rejects it as a fork.
+                (
+                    StatusCode::CONFLICT,
+                    format!("witness ledger insert conflict: {e}"),
+                )
+            })?;
+            (observed_now, prev)
+        }
+    };
+
+    let receipt = crate::witness::WitnessReceipt::build(
+        &req.device_pub,
+        device_registered,
+        req.sequence,
+        &req.tip,
+        observed_at,
+        prev.as_ref(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+
+    let keys = state.keys.read().await;
+    let jws = crate::verify::signing::sign_witness_jws(&receipt, &keys).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to sign witness receipt: {e}"),
+        )
+    })?;
+
+    Ok(Json(WitnessResponse { jws }))
+}
+
+/// POST /v1/witness without the `postgres` feature: refuse loudly rather than
+/// issue a RAM-backed receipt implying durable, monotonic history (A5).
+#[cfg(not(feature = "postgres"))]
+pub async fn witness_unavailable_handler() -> StatusCode {
+    StatusCode::SERVICE_UNAVAILABLE
+}
+
 /// GET /v1/receipts/:id — retrieve a verification receipt by ID.
 #[cfg(feature = "postgres")]
 pub async fn get_receipt_handler(

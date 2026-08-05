@@ -27,8 +27,8 @@ use sealedge_core::{
     sign_manifest, validate_archive, verify_manifest, write_archive, AudioMetadata,
     CamVideoMetadata, ChronicleState, ChunkInfo, ContentKey, DeviceBundle, DeviceInfo,
     DeviceKeypair, EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata, PointAttestation,
-    ProfileMetadata, RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest, CONTENT_AEAD_ID,
-    HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
+    ProfileMetadata, RecipientEntry, SegmentInfo, SensorMetadata, TrstManifest, WitnessRequest,
+    CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
 };
 use serde::Serialize;
 use std::time::Instant;
@@ -113,6 +113,7 @@ enum Commands {
     Wrap(WrapCmd),
     Verify(VerifyCmd),
     VerifyChronicle(VerifyChronicleCmd),
+    Witness(WitnessCmd),
     Unwrap(UnwrapCmd),
     EmitRequest(EmitRequestCmd),
     Keygen(KeygenCmd),
@@ -273,6 +274,44 @@ struct VerifyChronicleCmd {
     device_pub: String,
     #[arg(long, help = "Output results as JSON")]
     json: bool,
+    /// Witness receipt (JWS) to cross-check the local tip against (detects tail
+    /// deletion). Requires --witness-jwks.
+    #[arg(long = "witness", value_name = "PATH")]
+    witness: Option<PathBuf>,
+    /// Platform JWKS (URL or file path) used to verify the witness receipt.
+    #[arg(long = "witness-jwks", value_name = "URL|PATH")]
+    witness_jwks: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct WitnessCmd {
+    #[arg(
+        long = "chronicle",
+        value_name = "PATH",
+        help = "Chronicle state file whose tip to witness"
+    )]
+    chronicle: PathBuf,
+    #[arg(
+        long = "device-key",
+        value_name = "PATH",
+        help = "Device key bundle that signs the witness request"
+    )]
+    device_key: PathBuf,
+    #[arg(
+        long = "out",
+        value_name = "PATH",
+        help = "Write the receipt (with --post) or the signed request (without)"
+    )]
+    out: Option<PathBuf>,
+    #[arg(
+        long = "post",
+        value_name = "URL",
+        help = "Platform /v1/witness endpoint to submit to"
+    )]
+    post: Option<String>,
+    /// Accept a plaintext key bundle without a passphrase (CI/automation only).
+    #[arg(long)]
+    unencrypted: bool,
 }
 
 #[derive(Args, Debug)]
@@ -454,7 +493,8 @@ async fn run() -> Result<()> {
     match cli.command {
         Commands::Wrap(args) => handle_wrap(args),
         Commands::Verify(args) => handle_verify(args),
-        Commands::VerifyChronicle(args) => handle_verify_chronicle(args),
+        Commands::VerifyChronicle(args) => handle_verify_chronicle(args).await,
+        Commands::Witness(args) => handle_witness(args).await,
         Commands::Unwrap(args) => handle_unwrap(args),
         Commands::EmitRequest(args) => handle_emit_request(args).await,
         Commands::Keygen(args) => handle_keygen(args),
@@ -1641,7 +1681,7 @@ fn collect_archive_dirs(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
+async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
     let device_pub =
         if args.device_pub.starts_with("ed25519:") || args.device_pub.starts_with("ecdsa-p256:") {
             args.device_pub.clone()
@@ -1777,8 +1817,40 @@ fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
     let tip = format_archive_id(&last.digest);
     let tip_seq = last.seq;
 
+    // Optional witness cross-check (design §6): the offline chain can't detect
+    // TAIL deletion — a platform witness receipt can. The local tip must be at or
+    // ahead of the witnessed tip.
+    let mut witnessed: Option<(u64, String)> = None;
+    if let Some(receipt_path) = args.witness.as_deref() {
+        let token = fs::read_to_string(receipt_path).with_context(|| {
+            format!("Failed to read witness receipt: {}", receipt_path.display())
+        })?;
+        let jwks = load_jwks(args.witness_jwks.as_deref()).await?;
+        let (w_seq, w_tip) = verify_witness_receipt_jws(&token, &jwks)?;
+        if tip_seq < w_seq {
+            return Err(CliExitError {
+                code: 13,
+                message: format!(
+                    "local chronicle tip (sequence {tip_seq}) is BEHIND the witnessed tip \
+                     (sequence {w_seq}) — archives after {tip_seq} are missing (tail deletion)"
+                ),
+            }
+            .into());
+        }
+        if tip_seq == w_seq && tip != w_tip {
+            return Err(CliExitError {
+                code: 13,
+                message: format!(
+                    "tip mismatch at sequence {w_seq}: local {tip} vs witnessed {w_tip}"
+                ),
+            }
+            .into());
+        }
+        witnessed = Some((w_seq, w_tip));
+    }
+
     if args.json {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "chronicle": "pass",
             "device_pub": device_pub,
             "count": entries.len(),
@@ -1786,12 +1858,176 @@ fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
             "tip_sequence": tip_seq,
             "tip": tip,
         });
+        if let Some((w_seq, w_tip)) = &witnessed {
+            out["witnessed_sequence"] = serde_json::json!(w_seq);
+            out["witnessed_tip"] = serde_json::json!(w_tip);
+        }
         println!("{}", serde_json::to_string(&out)?);
     } else {
         println!("Chronicle: PASS");
         println!("Device: {device_pub}");
         println!("Archives: {} (sequence 0..{})", entries.len(), tip_seq);
         println!("Tip: {tip} @ sequence {tip_seq}");
+        if let Some((w_seq, _)) = &witnessed {
+            if tip_seq == *w_seq {
+                println!("Witness: PASS (tip matches witnessed sequence {w_seq})");
+            } else {
+                println!(
+                    "Witness: PASS (local ahead — witnessed sequence {w_seq}, local {tip_seq})"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Load a JWKS document from a URL (http/https) or a file path.
+async fn load_jwks(source: Option<&str>) -> Result<String> {
+    let src = source
+        .ok_or_else(|| anyhow::anyhow!("--witness requires --witness-jwks (a URL or file path)"))?;
+    if src.starts_with("http://") || src.starts_with("https://") {
+        let client = reqwest::Client::new();
+        Ok(client
+            .get(src)
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch JWKS from {src}"))?
+            .text()
+            .await?)
+    } else {
+        fs::read_to_string(src).with_context(|| format!("Failed to read JWKS file: {src}"))
+    }
+}
+
+/// Verify a witness-receipt JWS (EdDSA) against a JWKS and return its
+/// `(sequence, tip)`. Reuses `sealedge_core::verify_manifest` for the Ed25519
+/// check (no jsonwebtoken dependency in the CLI): the JWKS `x` and the JWS
+/// signature are base64url — re-encode them into the `ed25519:<base64>` form
+/// the core verifier expects.
+fn verify_witness_receipt_jws(token: &str, jwks_json: &str) -> Result<(u64, String)> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+
+    let parts: Vec<&str> = token.trim().split('.').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("witness receipt is not a JWS (expected 3 dot-separated parts)");
+    }
+
+    let header: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0])?)
+        .with_context(|| "Failed to decode JWS header")?;
+    let kid = header.get("kid").and_then(|k| k.as_str());
+
+    let jwks: serde_json::Value =
+        serde_json::from_str(jwks_json).with_context(|| "Failed to parse JWKS")?;
+    let keys = jwks
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .ok_or_else(|| anyhow::anyhow!("JWKS has no 'keys' array"))?;
+    let key = keys
+        .iter()
+        .find(|k| kid.is_none() || k.get("kid").and_then(|v| v.as_str()) == kid)
+        .ok_or_else(|| anyhow::anyhow!("no JWKS key matches the receipt's kid"))?;
+    let x = key
+        .get("x")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("JWKS key missing 'x'"))?;
+
+    let pubkey = format!("ed25519:{}", STANDARD.encode(URL_SAFE_NO_PAD.decode(x)?));
+    let sig = format!(
+        "ed25519:{}",
+        STANDARD.encode(URL_SAFE_NO_PAD.decode(parts[2])?)
+    );
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    if !verify_manifest(&pubkey, signing_input.as_bytes(), &sig)? {
+        anyhow::bail!("witness receipt signature is invalid");
+    }
+
+    let payload: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)
+        .with_context(|| "Failed to decode JWS payload")?;
+    let body = payload.get("witness").unwrap_or(&payload);
+    let seq = body
+        .get("sequence")
+        .and_then(|s| s.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("witness receipt missing 'sequence'"))?;
+    let tip = body
+        .get("tip")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| anyhow::anyhow!("witness receipt missing 'tip'"))?
+        .to_string();
+    Ok((seq, tip))
+}
+
+async fn handle_witness(args: WitnessCmd) -> Result<()> {
+    if args.unencrypted {
+        warn_unencrypted();
+    }
+    let state = ChronicleState::load(&args.chronicle).with_context(|| {
+        format!(
+            "Failed to read chronicle state: {}",
+            args.chronicle.display()
+        )
+    })?;
+    let bundle = load_bundle(&args.device_key, args.unencrypted)?;
+    if bundle.signing.public != state.device_pub {
+        anyhow::bail!(
+            "chronicle state belongs to {} but the device key is {}",
+            state.device_pub,
+            bundle.signing.public
+        );
+    }
+
+    let signed_at = current_timestamp()?;
+    let request = WitnessRequest::create_signed(
+        &bundle.signing,
+        state.sequence,
+        state.tip.clone(),
+        signed_at,
+    )?;
+
+    match args.post.as_deref() {
+        Some(url) => {
+            let client = reqwest::Client::new();
+            let response = client
+                .post(url)
+                .json(&request)
+                .send()
+                .await
+                .with_context(|| format!("Failed to POST witness to {url}"))?;
+            let status = response.status();
+            let text = response.text().await?;
+            if !status.is_success() {
+                return Err(CliExitError {
+                    code: status.as_u16() as i32,
+                    message: format!("witness rejected: HTTP {} — {}", status.as_u16(), text),
+                }
+                .into());
+            }
+            let v: serde_json::Value =
+                serde_json::from_str(&text).with_context(|| "witness response was not JSON")?;
+            let jws = v
+                .get("jws")
+                .and_then(|j| j.as_str())
+                .ok_or_else(|| anyhow::anyhow!("witness response missing 'jws'"))?;
+            match args.out.as_deref() {
+                Some(out) => {
+                    fs::write(out, jws)?;
+                    eprintln!("Witness receipt written to {}", out.display());
+                }
+                None => println!("{jws}"),
+            }
+            eprintln!("Witnessed sequence {} (tip {})", state.sequence, state.tip);
+        }
+        None => {
+            // No endpoint: emit the signed request for offline submission.
+            let json = serde_json::to_string_pretty(&request)?;
+            match args.out.as_deref() {
+                Some(out) => {
+                    fs::write(out, &json)?;
+                    eprintln!("Signed witness request written to {}", out.display());
+                }
+                None => println!("{json}"),
+            }
+        }
     }
 
     Ok(())

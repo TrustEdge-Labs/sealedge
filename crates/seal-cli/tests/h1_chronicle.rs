@@ -231,3 +231,113 @@ fn prev_hash_requires_prev_seq() {
         .assert()
         .failure();
 }
+
+/// Build a witness receipt JWS (as the platform would) plus a JWKS carrying the
+/// signing key, so the CLI's `--witness` cross-check can be exercised without a
+/// live platform. Returns `(jws_token, jwks_json)`.
+fn make_witness_jws(sequence: u64, tip: &str) -> (String, String) {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+
+    // Stand-in platform JWKS key.
+    let kp = sealedge_core::DeviceKeypair::generate().unwrap();
+    let header = serde_json::json!({ "alg": "EdDSA", "kid": "k1", "typ": "JWT" });
+    let payload = serde_json::json!({
+        "iss": "sealedge-verify-service",
+        "sub": kp.public,
+        "typ": "witness",
+        "witness": { "sequence": sequence, "tip": tip },
+    });
+    let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+    let signing_input = format!("{h}.{p}");
+
+    // Sign via core, then re-encode the raw signature as base64url (JWS form).
+    let sig_str = sealedge_core::sign_manifest(&kp, signing_input.as_bytes()).unwrap();
+    let raw_sig = STANDARD
+        .decode(sig_str.strip_prefix("ed25519:").unwrap())
+        .unwrap();
+    let token = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(&raw_sig));
+
+    let raw_pub = STANDARD
+        .decode(kp.public.strip_prefix("ed25519:").unwrap())
+        .unwrap();
+    let jwks = serde_json::json!({
+        "keys": [{ "kty": "OKP", "crv": "Ed25519", "kid": "k1", "x": URL_SAFE_NO_PAD.encode(&raw_pub) }]
+    });
+    (token, serde_json::to_string(&jwks).unwrap())
+}
+
+#[test]
+fn witness_crosscheck_passes_when_tip_matches() {
+    let dir = TempDir::new().unwrap();
+    let ed = keygen(dir.path(), "device");
+    let key = dir.path().join("device.key");
+    let chronicle = dir.path().join("device.chronicle");
+    let a0 = wrap_chronicle(dir.path(), &key, &chronicle, "clip0", b"p0");
+    let a1 = wrap_chronicle(dir.path(), &key, &chronicle, "clip1", b"p1");
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&chronicle).unwrap()).unwrap();
+    let seq = state["sequence"].as_u64().unwrap();
+    let tip = state["tip"].as_str().unwrap();
+
+    let (token, jwks) = make_witness_jws(seq, tip);
+    let rp = dir.path().join("receipt.jws");
+    let jp = dir.path().join("jwks.json");
+    fs::write(&rp, &token).unwrap();
+    fs::write(&jp, &jwks).unwrap();
+
+    seal()
+        .args([
+            "verify-chronicle",
+            a0.to_str().unwrap(),
+            a1.to_str().unwrap(),
+            "--device-pub",
+            &ed,
+            "--witness",
+            rp.to_str().unwrap(),
+            "--witness-jwks",
+            jp.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn witness_crosscheck_detects_tail_deletion() {
+    let dir = TempDir::new().unwrap();
+    let ed = keygen(dir.path(), "device");
+    let key = dir.path().join("device.key");
+    let chronicle = dir.path().join("device.chronicle");
+    let a0 = wrap_chronicle(dir.path(), &key, &chronicle, "clip0", b"p0");
+    let a1 = wrap_chronicle(dir.path(), &key, &chronicle, "clip1", b"p1");
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&chronicle).unwrap()).unwrap();
+    let seq = state["sequence"].as_u64().unwrap();
+
+    // The witness has seen a HIGHER sequence than the local chain — the tail was
+    // deleted. Cross-check must fail with exit 13.
+    let (token, jwks) = make_witness_jws(seq + 1, &format!("b3:{}", "f".repeat(64)));
+    let rp = dir.path().join("receipt.jws");
+    let jp = dir.path().join("jwks.json");
+    fs::write(&rp, &token).unwrap();
+    fs::write(&jp, &jwks).unwrap();
+
+    seal()
+        .args([
+            "verify-chronicle",
+            a0.to_str().unwrap(),
+            a1.to_str().unwrap(),
+            "--device-pub",
+            &ed,
+            "--witness",
+            rp.to_str().unwrap(),
+            "--witness-jwks",
+            jp.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .code(13);
+}

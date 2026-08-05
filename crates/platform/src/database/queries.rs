@@ -141,3 +141,65 @@ pub async fn get_receipt(
     .await?;
     Ok(row.map(|r| (r.get("jws"), r.get("kid"))))
 }
+
+// ─── H1 device chronicle: witness registry binding + ledger ───────────────────
+
+/// Look up a device by its signing public key (A2). Returns its row id when the
+/// key is registered. Relies on the `devices_device_pub_uniq` index.
+pub async fn get_device_by_pub(pool: &PgPool, device_pub: &str) -> Result<Option<Uuid>> {
+    let row = sqlx::query("SELECT id FROM devices WHERE device_pub = $1")
+        .bind(device_pub)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get("id")))
+}
+
+/// Load a device's witness-ledger entries, ascending by sequence.
+pub async fn witness_entries(
+    pool: &PgPool,
+    device_pub: &str,
+) -> Result<Vec<crate::witness::WitnessEntry>> {
+    let rows =
+        sqlx::query("SELECT sequence, tip, observed_at FROM witness_log WHERE device_pub = $1 ORDER BY sequence")
+            .bind(device_pub)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let sequence: i64 = r.get("sequence");
+            crate::witness::WitnessEntry {
+                sequence: sequence as u64,
+                tip: r.get("tip"),
+                observed_at: r.get("observed_at"),
+            }
+        })
+        .collect())
+}
+
+/// Append a witness-ledger row. The `(device_pub, sequence)` primary key makes a
+/// concurrent fork a hard conflict (surfaced to the caller as an error → 409).
+#[allow(clippy::too_many_arguments)]
+pub async fn witness_insert(
+    pool: &PgPool,
+    device_pub: &str,
+    sequence: u64,
+    tip: &str,
+    observed_at: &str,
+    device_registered: bool,
+    signed_at: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO witness_log (device_pub, sequence, tip, observed_at, device_registered, signed_at) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(device_pub)
+    .bind(sequence as i64)
+    .bind(tip)
+    .bind(observed_at)
+    .bind(device_registered)
+    .bind(signed_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

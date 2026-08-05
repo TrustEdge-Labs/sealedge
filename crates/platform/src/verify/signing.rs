@@ -14,6 +14,57 @@ use serde::{Deserialize, Serialize};
 
 use super::engine::ReceiptClaims;
 use super::jwks::KeyManager;
+use crate::witness::WitnessReceipt;
+
+/// Wrap a raw 32-byte Ed25519 secret key in the PKCS#8 DER envelope that
+/// `jsonwebtoken` expects for EdDSA signing.
+fn ed25519_pkcs8_der(secret: &[u8; 32]) -> Vec<u8> {
+    let mut der = Vec::with_capacity(48);
+    der.extend_from_slice(&[
+        0x30, 0x2e, // SEQUENCE
+        0x02, 0x01, 0x00, // INTEGER version 0
+        0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, // AlgorithmIdentifier: Ed25519 OID
+        0x04, 0x22, 0x04, 0x20, // OCTET STRING (private key), 32 bytes
+    ]);
+    der.extend_from_slice(secret);
+    der
+}
+
+/// JWS payload of a witness receipt (H1c). Mirrors the verification-receipt
+/// envelope (same `iss`, `sub` = signer) but with `typ: "witness"` and — by
+/// design — NO `exp`: a witnessed timestamp is a permanent historical fact (A4).
+#[derive(Debug, Serialize, Deserialize)]
+struct JwsWitnessPayload {
+    iss: String,
+    sub: String,
+    typ: String,
+    iat: i64,
+    witness: WitnessReceipt,
+}
+
+/// Sign a witness receipt as an EdDSA JWS using the platform's current JWKS key.
+pub fn sign_witness_jws(receipt: &WitnessReceipt, key_manager: &KeyManager) -> Result<String> {
+    let payload = JwsWitnessPayload {
+        iss: "sealedge-verify-service".to_string(),
+        sub: receipt.device_pub.clone(),
+        typ: "witness".to_string(),
+        iat: chrono::Utc::now().timestamp(),
+        witness: receipt.clone(),
+    };
+
+    let header = Header {
+        alg: Algorithm::EdDSA,
+        kid: Some(key_manager.current_kid()),
+        typ: Some("JWT".to_string()),
+        ..Default::default()
+    };
+    let encoding_key = EncodingKey::from_ed_der(&ed25519_pkcs8_der(
+        &key_manager.current_signing_key().to_bytes(),
+    ));
+
+    encode(&header, &payload, &encoding_key)
+        .map_err(|e| anyhow!("Failed to encode witness JWT: {}", e))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwsPayload {
@@ -53,28 +104,7 @@ pub async fn sign_receipt_jws(
         ..Default::default()
     };
 
-    // Convert Ed25519 key to PKCS#8 DER format that jsonwebtoken expects
-    let signing_key_bytes = signing_key.to_bytes();
-
-    // Create PKCS#8 DER wrapper for Ed25519 private key
-    // Ed25519 private key in PKCS#8 DER format
-    let mut pkcs8_der = Vec::new();
-    // SEQUENCE
-    pkcs8_der.extend_from_slice(&[0x30, 0x2e]);
-    // INTEGER version
-    pkcs8_der.extend_from_slice(&[0x02, 0x01, 0x00]);
-    // SEQUENCE algorithm identifier
-    pkcs8_der.extend_from_slice(&[0x30, 0x05]);
-    // OID for Ed25519
-    pkcs8_der.extend_from_slice(&[0x06, 0x03, 0x2b, 0x65, 0x70]);
-    // OCTET STRING private key
-    pkcs8_der.extend_from_slice(&[0x04, 0x22]);
-    // OCTET STRING content
-    pkcs8_der.extend_from_slice(&[0x04, 0x20]);
-    // The actual 32-byte Ed25519 private key
-    pkcs8_der.extend_from_slice(&signing_key_bytes);
-
-    let encoding_key = EncodingKey::from_ed_der(&pkcs8_der);
+    let encoding_key = EncodingKey::from_ed_der(&ed25519_pkcs8_der(&signing_key.to_bytes()));
 
     let token = encode(&header, &payload, &encoding_key)
         .map_err(|e| anyhow!("Failed to encode JWT: {}", e))?;

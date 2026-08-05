@@ -15,6 +15,10 @@
 
 pub mod verify;
 
+// Device-chronicle witness (H1): the pure monotonic-ledger decision logic and
+// receipt body. The postgres/HTTP wiring lives in `database` and `http`.
+pub mod witness;
+
 // CA module is library-only; not exposed via HTTP routes
 #[cfg(feature = "ca")]
 mod ca;

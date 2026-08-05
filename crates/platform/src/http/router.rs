@@ -39,10 +39,23 @@ use super::{
 /// Both `create_router` and `create_test_app` ultimately call this function,
 /// ensuring a single source of truth for the route set (TST-02 parity).
 pub fn build_base_router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/.well-known/jwks.json", get(jwks_handler))
         .route("/healthz", get(health_handler))
-        .route("/verify", get(verify_page_handler))
+        .route("/verify", get(verify_page_handler));
+
+    // /v1/witness (H1c): public (the device signature is the auth). Requires a
+    // durable ledger — with postgres it records + issues a receipt; without it
+    // the endpoint refuses loudly with 503 (A5) rather than fake durability.
+    #[cfg(feature = "postgres")]
+    let router = router.route("/v1/witness", post(super::handlers::witness_handler));
+    #[cfg(not(feature = "postgres"))]
+    let router = router.route(
+        "/v1/witness",
+        post(super::handlers::witness_unavailable_handler),
+    );
+
+    router
 }
 
 /// Compose the full Axum router for the Sealedge Platform service.
