@@ -83,11 +83,13 @@ fi
 
 # ── Step 2: Security audit ──────────────────────────────────────────
 step "Step 2: Security audit (cargo-audit)"
+# --deny warnings: any advisory (vulnerability OR informational warning) fails the
+# build unless it is explicitly accepted in .cargo/audit.toml with a justification.
 if command -v cargo-audit &> /dev/null; then
-    if cargo audit; then
-        pass "cargo audit"
+    if cargo audit --deny warnings; then
+        pass "cargo audit (deny warnings)"
     else
-        fail "cargo audit — run: cargo audit to see details"
+        fail "cargo audit — new advisory; fix it or justify-and-ignore in .cargo/audit.toml"
     fi
 else
     skip "cargo-audit not installed (install: cargo install cargo-audit)"

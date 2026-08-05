@@ -91,12 +91,12 @@ pub fn list_certificates(
     // Validate query parameters
     validate_list_query(query)?;
 
-    // Future: Implement actual database query instead of mock data
-    let mock_certificates = create_mock_certificates(query);
-
+    // Listing is not yet backed by the certificate store. Return an honest empty
+    // result rather than fabricated demo certificates — the production CA path must
+    // never emit mock certificates. (Future: query the store for this tenant.)
     let response = ListCertificatesResponse {
-        certificates: mock_certificates,
-        total: 2, // Future: Return real count from database
+        certificates: Vec::new(),
+        total: 0,
         limit: query.limit.unwrap_or(50),
         offset: query.offset.unwrap_or(0),
     };
@@ -475,104 +475,6 @@ pub fn validate_list_query(query: &ListCertificatesQuery) -> Result<(), String> 
     }
 
     Ok(())
-}
-
-/// Create mock certificates for demonstration.
-/// Future: Replace with actual database queries.
-pub fn create_mock_certificates(query: &ListCertificatesQuery) -> Vec<Certificate> {
-    use chrono::Utc;
-    use uuid::Uuid;
-
-    let now = Utc::now();
-    let tenant_id = TenantId::new();
-
-    let mut certificates = vec![
-        Certificate {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.clone(),
-            serial_number: "3701e7c1d6134032917ece67be150e25".to_string(),
-            subject: "CN=api-test.example.com, O=API Test Organization, C=US".to_string(),
-            issuer: "CN=Sealedge Enterprise CA, O=TrustEdge Labs LLC, C=US".to_string(),
-            not_before: now - chrono::Duration::days(1),
-            not_after: now + chrono::Duration::days(89),
-            status: CertificateStatus::Issued,
-            certificate_pem:
-                "-----BEGIN CERTIFICATE-----\nMOCK_CERT_DATA_1\n-----END CERTIFICATE-----"
-                    .to_string(),
-            created_at: now - chrono::Duration::days(1),
-            revoked_at: None,
-            revocation_reason: None,
-        },
-        Certificate {
-            id: Uuid::new_v4(),
-            tenant_id: tenant_id.clone(),
-            serial_number: "4812f8e2e7245143a28fdf78cf261f36".to_string(),
-            subject: "CN=test.example.com, O=Test Organization, C=US".to_string(),
-            issuer: "CN=Sealedge Enterprise CA, O=TrustEdge Labs LLC, C=US".to_string(),
-            not_before: now - chrono::Duration::days(7),
-            not_after: now + chrono::Duration::days(83),
-            status: CertificateStatus::Issued,
-            certificate_pem:
-                "-----BEGIN CERTIFICATE-----\nMOCK_CERT_DATA_2\n-----END CERTIFICATE-----"
-                    .to_string(),
-            created_at: now - chrono::Duration::days(7),
-            revoked_at: None,
-            revocation_reason: None,
-        },
-    ];
-
-    // Apply filters (simplified for demo)
-    if let Some(status_filter) = &query.status {
-        let filter_status = match status_filter.as_str() {
-            "Pending" => CertificateStatus::Pending,
-            "Issued" => CertificateStatus::Issued,
-            "Revoked" => CertificateStatus::Revoked,
-            "Expired" => CertificateStatus::Expired,
-            _ => CertificateStatus::Issued,
-        };
-        certificates.retain(|cert| {
-            std::mem::discriminant(&cert.status) == std::mem::discriminant(&filter_status)
-        });
-    }
-
-    if let Some(subject_filter) = &query.subject {
-        certificates.retain(|cert| {
-            cert.subject
-                .to_lowercase()
-                .contains(&subject_filter.to_lowercase())
-        });
-    }
-
-    if let Some(serial_filter) = &query.serial {
-        certificates.retain(|cert| cert.serial_number == *serial_filter);
-    }
-
-    if let Some(cn_filter) = &query.common_name {
-        certificates.retain(|cert| {
-            cert.subject
-                .to_lowercase()
-                .contains(&format!("cn={}", cn_filter.to_lowercase()))
-        });
-    }
-
-    if let Some(org_filter) = &query.organization {
-        certificates.retain(|cert| {
-            cert.subject
-                .to_lowercase()
-                .contains(&format!("o={}", org_filter.to_lowercase()))
-        });
-    }
-
-    // Apply pagination
-    let offset = query.offset.unwrap_or(0) as usize;
-    let limit = query.limit.unwrap_or(50) as usize;
-
-    if offset >= certificates.len() {
-        return vec![];
-    }
-
-    let end = std::cmp::min(offset + limit, certificates.len());
-    certificates[offset..end].to_vec()
 }
 
 #[cfg(test)]

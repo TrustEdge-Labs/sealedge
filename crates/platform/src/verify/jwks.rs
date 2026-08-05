@@ -9,7 +9,10 @@
 //! JWKS key management — Ed25519 signing key lifecycle with rotation support.
 
 use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64URL},
+    Engine,
+};
 use sealedge_core::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -180,7 +183,10 @@ impl KeyManager {
             "kid": kid,
             "use": "sig",
             "alg": "EdDSA",
-            "x": BASE64.encode(public_key_bytes)
+            // RFC 8037 §2: the OKP `x` parameter is base64url-encoded WITHOUT
+            // padding. Using standard base64 here breaks interop with conformant
+            // JWK consumers.
+            "x": BASE64URL.encode(public_key_bytes)
         })
     }
 
@@ -197,5 +203,47 @@ impl KeyManager {
         self.write_jwks_file()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 8037 §2 requires the OKP `x` parameter to be base64url-encoded with no
+    /// padding. Regression guard for the standard-base64 interop bug (M1).
+    #[test]
+    fn jwk_x_is_base64url_unpadded_rfc8037() {
+        let dir = std::env::temp_dir().join(format!(
+            "sealedge_jwks_rfc8037_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("key.json");
+        let km = KeyManager::new_with_path(key_path.to_str().unwrap()).unwrap();
+
+        let jwks = km.to_jwks();
+        let x = jwks["keys"][0]["x"]
+            .as_str()
+            .expect("JWKS key must have an 'x' field");
+
+        // Unpadded, URL-safe alphabet: no '=', '+', or '/'.
+        assert!(!x.contains('='), "x must be unpadded (no '='): {x}");
+        assert!(
+            !x.contains('+') && !x.contains('/'),
+            "x must use the URL-safe alphabet (no '+'/'/'): {x}"
+        );
+
+        // Decodes as base64url-no-pad to the raw 32-byte Ed25519 public key.
+        let decoded = BASE64URL
+            .decode(x)
+            .expect("x must decode as base64url-no-pad");
+        assert_eq!(
+            decoded,
+            km.current_key.verifying_key().as_bytes(),
+            "x must be the raw Ed25519 public key"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

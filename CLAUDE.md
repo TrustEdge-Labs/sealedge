@@ -23,12 +23,12 @@ cargo build --workspace --release
 cargo test --workspace
 
 # Test specific crates
-cargo test -p sealedge-types                     # Shared wire types (12 tests)
-cargo test -p sealedge-core --lib                # Core cryptography + attestation (199 tests)
-cargo test -p sealedge-seal-cli --test acceptance # Archive + attestation validation (36 tests)
-cargo test -p sealedge-platform --lib            # Platform unit tests (18 tests)
-cargo test -p sealedge-platform --test verify_integration           # Verify integration (9 tests)
-cargo test -p sealedge-platform --test verify_integration --features http  # All verify integration (27 tests)
+cargo test -p sealedge-types                     # Shared wire types
+cargo test -p sealedge-core --lib                # Core cryptography + attestation
+cargo test -p sealedge-seal-cli --test acceptance # Archive + attestation validation
+cargo test -p sealedge-platform --lib            # Platform unit tests
+cargo test -p sealedge-platform --test verify_integration           # Verify integration
+cargo test -p sealedge-platform --test verify_integration --features http  # All verify integration (with http feature)
 
 # Run a single test
 cargo test -p sealedge-core test_name -- --nocapture

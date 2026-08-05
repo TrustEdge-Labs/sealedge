@@ -441,9 +441,13 @@ mod http_tests {
             "JWKS key algorithm must be EdDSA"
         );
 
-        // The JWKS 'x' field is base64-standard encoded (RFC 4648 with padding)
+        // The JWKS 'x' field is base64url-encoded without padding (RFC 8037 §2).
         let x_b64 = first_key["x"].as_str().expect("JWKS key must have 'x'");
-        let pub_key_bytes: Vec<u8> = BASE64.decode(x_b64)?;
+        assert!(
+            !x_b64.contains('=') && !x_b64.contains('+') && !x_b64.contains('/'),
+            "JWKS 'x' must be base64url-no-pad per RFC 8037"
+        );
+        let pub_key_bytes: Vec<u8> = BASE64URL.decode(x_b64)?;
         assert_eq!(
             pub_key_bytes.len(),
             32,

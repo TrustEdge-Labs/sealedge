@@ -32,4 +32,31 @@ ignore = [
     # version available. Two instances: direct dep + yubikey transitive dep.
     # Re-accepted: v2.2 after Phase 45 OAEP migration (was previously accepted v1.3-v2.1).
     "RUSTSEC-2023-0071",
+
+    # ── Unmaintained transitive crates (no maintained drop-in; not runtime-exploitable) ──
+
+    # RUSTSEC-2025-0141: bincode 1.x is unmaintained.
+    # Severity: informational (unmaintained). No fix: bincode 2.x is a breaking
+    # rewrite; sealedge-core uses bincode 1.x for internal envelope (de)serialization
+    # of data it produced itself, not attacker-controlled formats. Tracked for a
+    # future 2.x migration.
+    "RUSTSEC-2025-0141",
+
+    # RUSTSEC-2024-0370: proc-macro-error 1.x is unmaintained.
+    # Severity: informational (unmaintained). Build-time-only transitive dependency
+    # (proc-macro expansion); no presence in shipped binaries or runtime attack surface.
+    "RUSTSEC-2024-0370",
+
+    # RUSTSEC-2025-0134: rustls-pemfile is unmaintained (folded into rustls-pki-types).
+    # Severity: informational (unmaintained). Transitive via the rustls/quinn TLS
+    # stack; removal depends on upstream migration to rustls-pki-types.
+    "RUSTSEC-2025-0134",
+
+    # ── git2 unsound advisories — feature-gated (`git-attestation`), not in default build ──
+    # Severity: unsound. git2 is pulled only by the optional `git-attestation` feature.
+    # The flagged APIs (Remote::list, Buf deref, BlameHunk Signature) are not on the
+    # attestation code path. No patched git2 release available yet.
+    "RUSTSEC-2026-0183", # git2: UB in Remote::list()
+    "RUSTSEC-2026-0008", # git2: UB dereferencing Buf
+    "RUSTSEC-2026-0184", # git2: UB in Signature from buffer-created BlameHunk
 ]
