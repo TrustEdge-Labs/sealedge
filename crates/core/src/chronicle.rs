@@ -302,7 +302,9 @@ impl RotationRecord {
         if self.kind != ROTATION_KIND {
             return false;
         }
-        if self.new.key_epoch != self.old.key_epoch.wrapping_add(1) {
+        // Exactly +1, rejecting an overflow at u32::MAX (checked_add → None) rather
+        // than wrapping to 0. Unreachable in practice, but wrong-shaped otherwise.
+        if self.old.key_epoch.checked_add(1) != Some(self.new.key_epoch) {
             return false;
         }
         let bytes = self.signing_bytes();
