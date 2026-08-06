@@ -2,8 +2,8 @@
 # MPL-2.0: https://mozilla.org/MPL/2.0/
 # Project: trustedge — Privacy and trust at the edge.
 #
-# CI runs on pull requests and release tags only.
-# Local checks (scripts/ci-check.sh) catch issues before push.
+# CI runs on pushes to main, pull requests, and release tags.
+# Local checks (scripts/ci-check.sh) also catch issues before push.
 # Use workflow_dispatch for manual runs when needed.
 
 name: CI
@@ -13,6 +13,7 @@ permissions:
 on:
   pull_request:
   push:
+    branches: [ main ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
