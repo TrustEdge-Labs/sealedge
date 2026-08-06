@@ -35,6 +35,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
+zeroize = { workspace = true }
 tracing = "0.1"
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 regex = "1.0"

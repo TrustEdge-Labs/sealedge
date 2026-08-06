@@ -310,6 +310,8 @@ The `sealedge-platform-server` binary reads configuration from environment varia
 | `RECEIPT_TTL_SECS` | `3600` | Verification receipt TTL in seconds (1 hour). Must be a valid integer. |
 | `JWT_AUDIENCE` | `sealedge-platform` | Expected JWT audience claim for verification tokens. |
 | `DATABASE_URL` | (required in release) | PostgreSQL connection URL. Required in release builds; defaults to localhost in debug. Requires `postgres` feature. |
+| `JWKS_KEY_PATH` | (required in release) | Path to the platform Ed25519 signing key (JWKS + witness/timestamp root). Required in release builds — no `/tmp` default; defaults to a temp path in debug only. |
+| `JWKS_KEY_PASSPHRASE` | (required in release) | Encrypts the signing key at rest (PBKDF2 600k + AES-256-GCM, `SEALEDGE-SEALED-V1`). Required in release builds (fail closed); if unset in debug, the key is written unencrypted with a warning (dev/test only). |
 
 See `deploy/.env.example` for the full template with all variables documented.
 

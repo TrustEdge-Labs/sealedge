@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — M2: platform signing-key custody
+
+- **Encryption at rest.** The platform Ed25519 signing key (JWKS + the
+  witness/timestamp root that backs revocation) is now encrypted at rest with
+  PBKDF2-HMAC-SHA256 (600k) + AES-256-GCM via `JWKS_KEY_PASSPHRASE`, reusing the
+  SEALEDGE-KEY-V2 scheme (new shared `seal_secret`/`open_secret` core primitive,
+  `SEALEDGE-SEALED-V1` blob).
+- **Fail closed in release.** `JWKS_KEY_PASSPHRASE` and an explicit `JWKS_KEY_PATH`
+  are now **required** in release builds — no `/tmp` default, no plaintext key.
+  Debug keeps a warned plaintext fallback for tests.
+- **No write-then-chmod race.** The key file is written atomically to a `0600`
+  temp sibling (mode set at creation) and renamed into place — closing the window
+  where the key was briefly world-readable.
+- **Zeroization.** Transient seed bytes, the base64 encoding, and the plaintext
+  JSON are zeroized after use; the in-memory passphrase is zeroized on drop and
+  never rendered by `Debug`.
+
 ## [6.1.0] - 2026-08-05
 
 ### Added — H1 Phase 2: key rotation & revocation

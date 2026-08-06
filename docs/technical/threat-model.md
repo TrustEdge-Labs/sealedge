@@ -135,6 +135,7 @@ platform-server (Rust, Axum HTTP) <-> postgres (internal network, no external po
 - Passphrase prompted at runtime via `rpassword` — never stored on disk or in environment variables
 - `--unencrypted` flag available as explicit opt-in for CI/automation environments; requires conscious operator choice
 - Hardware option: YubiKey PIV slot 9c — private key is generated on hardware and never extractable; software only holds the public certificate
+- **Platform signing key (M2)**: the server's Ed25519 key — which signs JWKS verification receipts AND witness/timestamp receipts (the revocation root, see T14/T15) — is encrypted at rest with the same PBKDF2(600k)+AES-256-GCM scheme via `JWKS_KEY_PASSPHRASE`. In release builds the passphrase and an explicit `JWKS_KEY_PATH` are **required** (no `/tmp` default, no plaintext); the file is written atomically at `0600` (no write-then-chmod race) and transient key material is zeroized. Residual: the passphrase lives in the server's environment/process memory (standard for a headless signing service) — a full host compromise still exposes it; a hardware/KMS backend would close that, tracked as future work.
 
 ---
 

@@ -172,9 +172,10 @@ pub use error::{BackendError, TransportError, TrustEdgeError};
 pub use format::*;
 pub use hybrid::{open_envelope, seal_for_recipient, HybridEncryptionError, SymmetricKey};
 pub use keywrap::{
-    cek_wrap_info, chunk_aad_v2, hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng,
-    parse_x25519_public, recipient_id, seeded_test_rng, ContentKey, DeviceBundle,
+    cek_wrap_info, chunk_aad_v2, hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng, open_secret,
+    parse_x25519_public, recipient_id, seal_secret, seeded_test_rng, ContentKey, DeviceBundle,
     KeyAgreementKeypair, CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
+    SEALED_SECRET_HEADER_V1,
 };
 pub use point_attestation::{ArtifactRef, PointAttestation, PointAttestationError};
 pub use sealedge_seal_protocols::archive::manifest::{

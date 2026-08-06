@@ -36,7 +36,7 @@ use pbkdf2::pbkdf2_hmac;
 use rand_core::{CryptoRng, OsRng, RngCore, SeedableRng};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret as XSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::crypto::{CryptoError, DeviceKeypair};
 
@@ -56,6 +56,111 @@ const KEY_AGREEMENT_PREFIX: &str = "x25519:";
 const BUNDLE_HEADER_V2: &str = "SEALEDGE-KEY-V2";
 /// Minimum PBKDF2-HMAC-SHA256 iterations (OWASP 2023). Mirrors `crypto.rs`.
 const PBKDF2_MIN_ITERATIONS: u32 = 600_000;
+
+/// On-disk header for a generic sealed secret — distinct from
+/// [`BUNDLE_HEADER_V2`] so a single-secret blob and a dual-key bundle can never
+/// be confused on load.
+pub const SEALED_SECRET_HEADER_V1: &str = "SEALEDGE-SEALED-V1";
+
+/// Encrypt arbitrary secret bytes at rest with PBKDF2-HMAC-SHA256 (600k) +
+/// AES-256-GCM — the same scheme the `SEALEDGE-KEY-V2` bundle uses, exposed for
+/// single-secret custody (e.g. the platform's JWKS signing key). Format:
+/// `SEALEDGE-SEALED-V1\n{"version":1,"salt","nonce","iterations"}\n<ciphertext>`.
+pub fn seal_secret(secret: &[u8], passphrase: &str) -> Result<Vec<u8>, CryptoError> {
+    let mut salt = [0u8; 32];
+    OsRng.fill_bytes(&mut salt);
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let iterations = PBKDF2_MIN_ITERATIONS;
+
+    let mut derived_key = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), &salt, iterations, &mut derived_key);
+    let cipher = Aes256Gcm::new_from_slice(&derived_key)
+        .map_err(|e| CryptoError::EncryptionFailed(format!("AES key init: {e}")))?;
+    derived_key.zeroize();
+
+    let ciphertext = cipher
+        .encrypt(AesGcmNonce::from_slice(&nonce_bytes), secret)
+        .map_err(|e| CryptoError::EncryptionFailed(format!("AES-GCM encrypt: {e}")))?;
+
+    let metadata = serde_json::json!({
+        "version": 1,
+        "salt": BASE64.encode(salt),
+        "nonce": BASE64.encode(nonce_bytes),
+        "iterations": iterations,
+    });
+    let mut out = Vec::new();
+    out.extend_from_slice(SEALED_SECRET_HEADER_V1.as_bytes());
+    out.push(b'\n');
+    out.extend_from_slice(metadata.to_string().as_bytes());
+    out.push(b'\n');
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Decrypt bytes produced by [`seal_secret`]. Wrong passphrase, corruption, a
+/// foreign header, or a below-minimum iteration count all return `Err`. The
+/// recovered plaintext is zeroized on drop.
+pub fn open_secret(data: &[u8], passphrase: &str) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let header_end = data
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing header line".into()))?;
+    let header = std::str::from_utf8(&data[..header_end])
+        .map_err(|_| CryptoError::InvalidKeyFormat("Invalid UTF-8 header".into()))?;
+    if header != SEALED_SECRET_HEADER_V1 {
+        return Err(CryptoError::InvalidKeyFormat(format!(
+            "Expected header '{SEALED_SECRET_HEADER_V1}', got '{header}'"
+        )));
+    }
+
+    let meta_start = header_end + 1;
+    let meta_end = data[meta_start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|p| meta_start + p)
+        .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing metadata line".into()))?;
+    let meta_str = std::str::from_utf8(&data[meta_start..meta_end])
+        .map_err(|_| CryptoError::InvalidKeyFormat("Invalid UTF-8 metadata".into()))?;
+    let meta: serde_json::Value = serde_json::from_str(meta_str)
+        .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid JSON metadata: {e}")))?;
+
+    let salt = BASE64
+        .decode(meta["salt"].as_str().unwrap_or_default())
+        .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid salt base64: {e}")))?;
+    let nonce_bytes = BASE64
+        .decode(meta["nonce"].as_str().unwrap_or_default())
+        .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid nonce base64: {e}")))?;
+    let iterations_u64 = meta["iterations"]
+        .as_u64()
+        .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing iterations".into()))?;
+    if iterations_u64 < PBKDF2_MIN_ITERATIONS as u64 {
+        return Err(CryptoError::InvalidKeyFormat(format!(
+            "Sealed secret uses {iterations_u64} PBKDF2 iterations, minimum is {PBKDF2_MIN_ITERATIONS}"
+        )));
+    }
+    let iterations = u32::try_from(iterations_u64)
+        .map_err(|_| CryptoError::InvalidKeyFormat("iterations value out of range".into()))?;
+    if nonce_bytes.len() != 12 {
+        return Err(CryptoError::InvalidKeyFormat(
+            "Nonce must be 12 bytes".into(),
+        ));
+    }
+
+    let ciphertext = &data[meta_end + 1..];
+    let mut derived_key = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), &salt, iterations, &mut derived_key);
+    let cipher = Aes256Gcm::new_from_slice(&derived_key)
+        .map_err(|e| CryptoError::EncryptionFailed(format!("AES key init: {e}")))?;
+    derived_key.zeroize();
+
+    let plaintext = cipher
+        .decrypt(AesGcmNonce::from_slice(&nonce_bytes), ciphertext)
+        .map_err(|_| {
+            CryptoError::DecryptionFailed("Wrong passphrase or corrupted sealed secret".into())
+        })?;
+    Ok(Zeroizing::new(plaintext))
+}
 
 // ─── X25519 key-agreement keypair ─────────────────────────────────────────────
 
@@ -540,6 +645,39 @@ mod tests {
 
         // Wrong passphrase must fail.
         assert!(DeviceBundle::import_encrypted(&blob, "wrong").is_err());
+    }
+
+    #[test]
+    fn test_seal_open_secret_roundtrip() {
+        let secret = [7u8; 32];
+        let blob = seal_secret(&secret, "correct horse battery staple").unwrap();
+        // Headered, and the plaintext key is not present in the blob.
+        assert!(blob.starts_with(b"SEALEDGE-SEALED-V1\n"));
+        assert!(
+            !blob.windows(secret.len()).any(|w| w == secret),
+            "raw secret must not appear in the sealed blob"
+        );
+        let opened = open_secret(&blob, "correct horse battery staple").unwrap();
+        assert_eq!(&opened[..], &secret[..]);
+    }
+
+    #[test]
+    fn test_open_secret_rejects_wrong_passphrase_and_tamper() {
+        let blob = seal_secret(b"a-32-byte-or-any-length-secret!!", "pw").unwrap();
+        // Wrong passphrase.
+        assert!(open_secret(&blob, "nope").is_err());
+        // Tampered ciphertext (flip the last byte) → AEAD failure.
+        let mut bad = blob.clone();
+        *bad.last_mut().unwrap() ^= 0x01;
+        assert!(open_secret(&bad, "pw").is_err());
+    }
+
+    #[test]
+    fn test_open_secret_rejects_foreign_header() {
+        // A SEALEDGE-KEY-V2 bundle must not open as a sealed secret (no confusion).
+        let bundle = DeviceBundle::generate().unwrap();
+        let bundle_blob = bundle.export_encrypted("pw").unwrap();
+        assert!(open_secret(&bundle_blob, "pw").is_err());
     }
 
     #[test]
