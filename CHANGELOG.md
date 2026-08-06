@@ -31,7 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where the key was briefly world-readable.
 - **Zeroization.** Transient seed bytes, the base64 encoding, and the plaintext
   JSON are zeroized after use; the in-memory passphrase is zeroized on drop and
-  never rendered by `Debug`.
+  never rendered by `Debug`. The live `SigningKey` itself is now
+  `ZeroizeOnDrop` (enabled the `zeroize` feature on `ed25519-dalek`), with a
+  compile-time guard test so the property can't silently regress (F1).
+- **PBKDF2 iteration ceiling.** `open_secret` / bundle import now reject an
+  above-ceiling iteration count (max 10M, symmetric with the 600k floor), so a
+  corrupt or hostile key file can't stall decryption at boot (F2).
 
 ## [6.1.0] - 2026-08-05
 

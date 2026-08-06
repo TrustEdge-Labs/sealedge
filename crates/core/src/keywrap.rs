@@ -56,6 +56,11 @@ const KEY_AGREEMENT_PREFIX: &str = "x25519:";
 const BUNDLE_HEADER_V2: &str = "SEALEDGE-KEY-V2";
 /// Minimum PBKDF2-HMAC-SHA256 iterations (OWASP 2023). Mirrors `crypto.rs`.
 const PBKDF2_MIN_ITERATIONS: u32 = 600_000;
+/// Maximum accepted PBKDF2 iterations. Legitimate writers use exactly the floor;
+/// this ceiling (generous headroom over 600k) rejects a corrupt or hostile blob
+/// that sets an absurd count to stall decryption — an availability guard
+/// symmetric with the floor. F2.
+const PBKDF2_MAX_ITERATIONS: u32 = 10_000_000;
 
 /// On-disk header for a generic sealed secret — distinct from
 /// [`BUNDLE_HEADER_V2`] so a single-secret blob and a dual-key bundle can never
@@ -137,6 +142,11 @@ pub fn open_secret(data: &[u8], passphrase: &str) -> Result<Zeroizing<Vec<u8>>, 
     if iterations_u64 < PBKDF2_MIN_ITERATIONS as u64 {
         return Err(CryptoError::InvalidKeyFormat(format!(
             "Sealed secret uses {iterations_u64} PBKDF2 iterations, minimum is {PBKDF2_MIN_ITERATIONS}"
+        )));
+    }
+    if iterations_u64 > PBKDF2_MAX_ITERATIONS as u64 {
+        return Err(CryptoError::InvalidKeyFormat(format!(
+            "Sealed secret uses {iterations_u64} PBKDF2 iterations, maximum is {PBKDF2_MAX_ITERATIONS}"
         )));
     }
     let iterations = u32::try_from(iterations_u64)
@@ -519,6 +529,11 @@ impl DeviceBundle {
                 "Bundle uses {iterations_u64} PBKDF2 iterations, minimum is {PBKDF2_MIN_ITERATIONS}"
             )));
         }
+        if iterations_u64 > PBKDF2_MAX_ITERATIONS as u64 {
+            return Err(CryptoError::InvalidKeyFormat(format!(
+                "Bundle uses {iterations_u64} PBKDF2 iterations, maximum is {PBKDF2_MAX_ITERATIONS}"
+            )));
+        }
         let iterations = u32::try_from(iterations_u64)
             .map_err(|_| CryptoError::InvalidKeyFormat("iterations value out of range".into()))?;
         if nonce_bytes.len() != 12 {
@@ -670,6 +685,44 @@ mod tests {
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(open_secret(&bad, "pw").is_err());
+    }
+
+    /// F1: the live Ed25519 signing key must zeroize on drop. This is a
+    /// compile-time guard — if the `zeroize` feature is dropped from
+    /// ed25519-dalek, `SigningKey: ZeroizeOnDrop` no longer holds and this test
+    /// fails to build, flagging the regression.
+    #[test]
+    fn signing_key_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<ed25519_dalek::SigningKey>();
+    }
+
+    #[test]
+    fn test_open_secret_rejects_out_of_range_iterations() {
+        // F2: reject a blob whose metadata sets an absurd iteration count (a
+        // decrypt-stall DoS) — symmetric with the floor. Rewrite just the meta
+        // line's "iterations" field, keeping the header + ciphertext.
+        let blob = seal_secret(&[3u8; 32], "pw").unwrap();
+        let text = String::from_utf8_lossy(&blob);
+        let mut lines = text.splitn(3, '\n');
+        let header = lines.next().unwrap();
+        let meta = lines.next().unwrap();
+        let hacked_meta = meta.replace("\"iterations\":600000", "\"iterations\":4000000000");
+        assert_ne!(hacked_meta, meta, "meta must contain the iterations field");
+        // Rebuild: header \n hacked_meta \n <original ciphertext bytes>.
+        let ct_start = header.len() + 1 + meta.len() + 1;
+        let mut hacked = Vec::new();
+        hacked.extend_from_slice(header.as_bytes());
+        hacked.push(b'\n');
+        hacked.extend_from_slice(hacked_meta.as_bytes());
+        hacked.push(b'\n');
+        hacked.extend_from_slice(&blob[ct_start..]);
+
+        let err = open_secret(&hacked, "pw").unwrap_err();
+        assert!(
+            format!("{err}").contains("maximum"),
+            "must reject above-ceiling iterations, got: {err}"
+        );
     }
 
     #[test]
