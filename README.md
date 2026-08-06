@@ -9,7 +9,7 @@ GitHub: https://github.com/TrustEdge-Labs/sealedge
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 [![Commercial License](https://img.shields.io/badge/Commercial-License%20Available-blue.svg)](mailto:enterprise@trustedgelabs.com)
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-6.0.0-blue.svg)](https://github.com/TrustEdge-Labs/sealedge/releases/tag/v6.0.0)
+[![Version](https://img.shields.io/badge/version-6.1.0-blue.svg)](https://github.com/TrustEdge-Labs/sealedge/releases/tag/v6.1.0)
 [![YubiKey](https://img.shields.io/badge/YubiKey-Hardware%20Supported-green.svg)](https://www.yubico.com/)
 
 # Sealedge

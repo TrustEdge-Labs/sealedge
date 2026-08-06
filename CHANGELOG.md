@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.1.0] - 2026-08-05
+
 ### Added — H1 Phase 2: key rotation & revocation
 
 - **Key rotation.** `seal rekey --chronicle <state> --old-key <old> --new-key <new>
