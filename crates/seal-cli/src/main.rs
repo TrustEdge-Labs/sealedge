@@ -21,16 +21,17 @@ use clap::{Args, Parser, Subcommand};
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use sealedge_core::{
-    archive_digest, cek_wrap_info, chain_next, chunk_aad_v2, decrypt_segment, encrypt_segment,
-    format_archive_id, genesis, hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng,
-    is_encrypted_key_file, read_archive, recipient_id, seeded_test_rng, segment_hash,
-    sign_manifest, validate_archive, verify_manifest, write_archive, AudioMetadata,
-    CamVideoMetadata, ChronicleState, ChunkInfo, ContentKey, DeviceBundle, DeviceInfo,
-    DeviceKeypair, EncryptionBlock, GenericMetadata, HpkeSuite, LogMetadata, PointAttestation,
-    ProfileMetadata, RecipientEntry, RotationRecord, SegmentInfo, SensorMetadata, TrstManifest,
-    WitnessRequest, CONTENT_AEAD_ID, HPKE_AEAD_ID, HPKE_KDF_ID, HPKE_KEM_ID,
+    archive_digest, cek_wrap_info, chunk_aad_v2, decrypt_segment, encrypt_segment,
+    format_archive_id, hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng, is_encrypted_key_file,
+    read_archive, recipient_id, seeded_test_rng, segment_hash, sign_manifest, validate_archive,
+    verify_manifest, ArchiveWriter, AudioMetadata, CamVideoMetadata, ChronicleState, ChunkInfo,
+    ContentKey, DeviceBundle, DeviceInfo, DeviceKeypair, EncryptionBlock, GenericMetadata,
+    HpkeSuite, LogMetadata, PointAttestation, ProfileMetadata, RecipientEntry, RotationRecord,
+    SegmentInfo, SensorMetadata, TrstManifest, WitnessRequest, CONTENT_AEAD_ID, HPKE_AEAD_ID,
+    HPKE_KDF_ID, HPKE_KEM_ID,
 };
 use serde::Serialize;
+use std::io::{BufReader, Read};
 use std::time::Instant;
 // Shared wire types from sealedge-types (accessed via sealedge-core re-export or directly).
 // SegmentRef, VerifyOptions, VerifyRequest use the shared canonical definitions.
@@ -481,6 +482,25 @@ fn generate_seeded_nonce24(rng: &mut dyn RngCore) -> [u8; 24] {
     nonce
 }
 
+/// Read up to `size` bytes, coalescing short `Read`s so each returned buffer is
+/// exactly `size` except the final one (which may be shorter). Returns an empty
+/// buffer at EOF. This reproduces `slice::chunks(size)` boundaries while reading
+/// the input incrementally (H3 streaming wrap) — identical chunk boundaries keep
+/// the CEK/nonce sequence and every hash byte-identical to the pre-stream path.
+fn read_exact_or_eof<R: Read>(reader: &mut R, size: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; size];
+    let mut filled = 0;
+    while filled < size {
+        let n = reader.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
 /// Derive a device_id string from a prefixed public key string.
 ///
 /// Extracts the first 6 bytes of the raw key bytes (after the prefix) and formats
@@ -820,15 +840,26 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
     };
     let device_id = pub_key_to_device_id(&signing_public_key)?;
 
-    // Read input file
-    let input_data = fs::read(&args.input)
-        .with_context(|| format!("Failed to read input file: {}", args.input.display()))?;
-
-    if input_data.is_empty() {
+    // Reject empty input before creating any output (matches prior behavior and
+    // avoids leaving an empty .seal directory). The context string is kept as
+    // "Failed to read input file" for a missing/unreadable input so the message
+    // is stable (N1) across the streaming rewrite.
+    if fs::metadata(&args.input)
+        .with_context(|| format!("Failed to read input file: {}", args.input.display()))?
+        .len()
+        == 0
+    {
         anyhow::bail!("Input file is empty");
     }
 
-    // Create output directory
+    // Open input for streaming (H3): read one chunk at a time, never the whole
+    // payload — peak RAM is O(chunk_size), not O(payload).
+    let input_file = fs::File::open(&args.input)
+        .with_context(|| format!("Failed to read input file: {}", args.input.display()))?;
+    let mut reader = BufReader::new(input_file);
+
+    // Validate output name, then lay down the .seal skeleton via the streaming
+    // writer (it creates chunks/ and signatures/).
     let archive_name = args
         .output
         .file_name()
@@ -839,9 +870,8 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         anyhow::bail!("Output directory must end with .seal");
     }
 
-    fs::create_dir_all(&args.output)?;
-    fs::create_dir_all(args.output.join("chunks"))?;
-    fs::create_dir_all(args.output.join("signatures"))?;
+    let mut writer = ArchiveWriter::create(&args.output)
+        .with_context(|| format!("Failed to create archive: {}", args.output.display()))?;
 
     // Initialize RNG - seeded if provided, otherwise use default
     let mut rng: Box<dyn RngCore> = match args.seed {
@@ -858,11 +888,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         _ => args.chunk_seconds.unwrap_or(0.0),
     };
 
-    // Process chunks
-    let chunks = input_data.chunks(args.chunk_size).collect::<Vec<_>>();
     let mut segments = Vec::new();
-    let mut chain_state = genesis();
-    let mut encrypted_chunks = Vec::new();
 
     // Create timestamp for all operations - deterministic if seeded
     let started_at = if args.seed.is_some() {
@@ -874,6 +900,9 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
 
     // C4: a per-archive random CEK keys the chunk AEAD (deterministic in seed
     // mode via seed_rng). --sign-only leaves chunks in plaintext (no CEK).
+    // SA3 determinism: the CEK is drawn ONCE here, pre-loop; per-chunk nonces are
+    // drawn in-loop below; the HPKE wrap of the CEK happens post-loop. That fixed
+    // interleaving is what keeps seeded output byte-identical — do not reorder it.
     let cek: Option<ContentKey> = if args.sign_only {
         None
     } else if let Some(rng) = seed_rng.as_mut() {
@@ -890,27 +919,35 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         .as_ref()
         .map(|c| chacha20poly1305::Key::from_slice(c.as_bytes()));
 
-    for (i, chunk_data) in chunks.iter().enumerate() {
-        let chunk_id = i as u32;
+    // Stream the input one chunk_size buffer at a time: read → encrypt → write →
+    // segment. Peak RAM is one chunk (+ its ciphertext), independent of payload
+    // size. Boundaries match the former `input_data.chunks(chunk_size)` exactly.
+    let mut chunk_count = 0usize;
+    loop {
+        let chunk_data = read_exact_or_eof(&mut reader, args.chunk_size)
+            .with_context(|| format!("Failed to read input file: {}", args.input.display()))?;
+        if chunk_data.is_empty() {
+            break; // EOF (non-empty guaranteed by the metadata check above)
+        }
+        let i = chunk_count;
 
         // Encrypted mode: on-disk chunk is [nonce:24][ciphertext]. Sign-only mode
-        // stores the plaintext chunk directly.
+        // stores the plaintext chunk directly. Nonces are drawn in-loop, one per
+        // chunk in index order (SA3).
         let stored_chunk = match chunk_key {
             Some(key) => {
                 let nonce = generate_seeded_nonce24(&mut *rng);
-                let ct = encrypt_segment(key, &nonce, chunk_data, &chunk_aad)?;
+                let ct = encrypt_segment(key, &nonce, &chunk_data, &chunk_aad)?;
                 let mut c = Vec::with_capacity(24 + ct.len());
                 c.extend_from_slice(&nonce);
                 c.extend_from_slice(&ct);
                 c
             }
-            None => chunk_data.to_vec(),
+            None => chunk_data,
         };
 
-        // Hash the stored bytes to match what validate_archive reads from disk.
-        let hash = segment_hash(&stored_chunk);
-        encrypted_chunks.push(stored_chunk);
-        let next_state = chain_next(&chain_state, &hash);
+        // Stream the chunk to disk (hashes + advances the continuity chain).
+        let outcome = writer.push_chunk(&stored_chunk)?;
 
         // Build start_time: time-based for cam.video, index-based for generic
         let start_time = if args.profile == "cam.video" {
@@ -918,26 +955,23 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
         } else {
             format!("segment-{}", i)
         };
-        let chunk_filename = format!("{:05}.bin", chunk_id);
 
-        let segment = SegmentInfo {
-            chunk_file: chunk_filename,
-            blake3_hash: hex::encode(hash),
+        segments.push(SegmentInfo {
+            chunk_file: format!("{:05}.bin", outcome.index),
+            blake3_hash: hex::encode(outcome.blake3),
             start_time,
             duration_seconds: chunk_seconds,
-            continuity_hash: hex::encode(next_state),
-        };
-
-        segments.push(segment);
-        chain_state = next_state;
+            continuity_hash: hex::encode(outcome.continuity),
+        });
+        chunk_count += 1;
     }
 
     // Build profile metadata and compute end time
     let metadata = match args.profile.as_str() {
         "cam.video" => {
             let fps = args.fps.unwrap_or(30);
-            let capture_end_time = if !chunks.is_empty() {
-                let last_chunk_start = (chunks.len() - 1) as f64 * chunk_seconds;
+            let capture_end_time = if chunk_count > 0 {
+                let last_chunk_start = (chunk_count - 1) as f64 * chunk_seconds;
                 let end_timestamp = chrono::DateTime::parse_from_rfc3339(&started_at)?
                     + chrono::Duration::milliseconds((last_chunk_start * 1000.0) as i64)
                     + chrono::Duration::milliseconds((chunk_seconds * 1000.0) as i64);
@@ -1159,9 +1193,13 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
 
     manifest.set_signature(signature.clone());
 
-    // Write archive
+    // Finalize: write manifest.json + signatures/manifest.sig (chunks already
+    // streamed to disk above). SA1: finalize errors if the manifest exceeds the
+    // shared reader cap, so wrap never emits an archive verify would reject.
     let detached_sig = signature.as_bytes();
-    write_archive(&args.output, &manifest, encrypted_chunks, detached_sig)?;
+    writer
+        .finalize(&manifest, detached_sig)
+        .with_context(|| format!("Failed to finalize archive: {}", args.output.display()))?;
 
     // H1: advance the chronicle head pointer (the tip is the digest of the
     // signed manifest we just wrote).
@@ -1184,7 +1222,7 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
     let result = WrapResult {
         output_dir: args.output,
         signature,
-        chunk_count: chunks.len(),
+        chunk_count,
     };
 
     println!("Archive: {}", result.output_dir.display());

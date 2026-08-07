@@ -10,14 +10,130 @@ use crate::TrstManifest;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use crate::error::{ArchiveError, ChainError, ManifestError};
 
 /// Type alias for chunk data (index, bytes)
 type ChunkData = Vec<(usize, Vec<u8>)>;
 
-/// Write a complete .trst archive with manifest, signature, and chunk files
+/// Maximum accepted `manifest.json` size (H3 SA1). A single shared constant so
+/// the producer guard ([`ArchiveWriter::finalize`]) and the bounded readers
+/// ([`read_manifest`], [`read_archive`]) can never drift: `wrap` refuses to emit
+/// a manifest a compliant reader would reject, and readers refuse a hostile
+/// oversized manifest (parse-DoS defense-in-depth).
+pub const MANIFEST_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum accepted detached-signature size (H3). A signature is ~100 bytes; this
+/// is a generous defense-in-depth bound.
+pub const SIG_MAX_BYTES: usize = 4 * 1024;
+
+/// Outcome of streaming one chunk through [`ArchiveWriter::push_chunk`].
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkOutcome {
+    pub index: u32,
+    pub blake3: [u8; 32],
+    pub continuity: [u8; 32],
+    /// Bytes written to `chunks/NNNNN.bin` (N2 — handy for CLI stats).
+    pub stored_len: usize,
+}
+
+/// Streaming, constant-memory `.seal` writer (H3 P1).
+///
+/// `create` lays down the directory skeleton; each `push_chunk` writes one chunk
+/// file and advances the BLAKE3 continuity chain, holding only that chunk in
+/// memory; `finalize` writes the manifest + detached signature. Peak memory is
+/// one chunk regardless of total payload size — versus the "collect every
+/// ciphertext then flush" [`write_archive`] path, which is ~1× payload.
+pub struct ArchiveWriter {
+    base_path: PathBuf,
+    chunks_dir: PathBuf,
+    next_index: u32,
+    chain_state: [u8; 32],
+}
+
+impl ArchiveWriter {
+    /// Create the `.seal` directory skeleton (`chunks/`, `signatures/`) and seed
+    /// the continuity chain from genesis.
+    pub fn create<P: AsRef<Path>>(base_dir: P) -> Result<Self, ArchiveError> {
+        let base_path = base_dir.as_ref().to_path_buf();
+        let chunks_dir = base_path.join("chunks");
+        fs::create_dir_all(&base_path)?;
+        fs::create_dir_all(base_path.join("signatures"))?;
+        fs::create_dir_all(&chunks_dir)?;
+        Ok(Self {
+            base_path,
+            chunks_dir,
+            next_index: 0,
+            chain_state: crate::chain::genesis(),
+        })
+    }
+
+    /// Write one already-stored chunk (encrypted `[nonce||ct]`, or plaintext in
+    /// sign-only mode) to `chunks/NNNNN.bin`, hashing it and advancing the
+    /// continuity chain. Returns the hashes the caller needs to build its
+    /// `SegmentInfo`. Holds only `stored_bytes` in memory.
+    pub fn push_chunk(&mut self, stored_bytes: &[u8]) -> Result<ChunkOutcome, ArchiveError> {
+        let blake3 = crate::chain::segment_hash(stored_bytes);
+        let continuity = crate::chain::chain_next(&self.chain_state, &blake3);
+
+        let filename = format!("{:05}.bin", self.next_index);
+        let mut f = File::create(self.chunks_dir.join(filename))?;
+        f.write_all(stored_bytes)?;
+
+        let outcome = ChunkOutcome {
+            index: self.next_index,
+            blake3,
+            continuity,
+            stored_len: stored_bytes.len(),
+        };
+        self.chain_state = continuity;
+        self.next_index += 1;
+        Ok(outcome)
+    }
+
+    /// Finalize: write `manifest.json` + `signatures/manifest.sig`.
+    ///
+    /// Errors (SA1) if the serialized manifest exceeds [`MANIFEST_MAX_BYTES`] —
+    /// `wrap` must never emit a manifest a compliant reader would refuse; the fix
+    /// is a larger `--chunk-size` (fewer segments). Also checks the segment count
+    /// matches the chunks actually written.
+    pub fn finalize(
+        self,
+        manifest: &TrstManifest,
+        detached_sig: &[u8],
+    ) -> Result<(), ArchiveError> {
+        if manifest.segments.len() != self.next_index as usize {
+            return Err(ArchiveError::SchemaMismatch(format!(
+                "Chunk count mismatch: {} chunks written, {} segments in manifest",
+                self.next_index,
+                manifest.segments.len()
+            )));
+        }
+
+        let manifest_json = serde_json::to_string_pretty(manifest)?;
+        if manifest_json.len() > MANIFEST_MAX_BYTES {
+            return Err(ArchiveError::SchemaMismatch(format!(
+                "manifest exceeds the reader cap ({} > {} bytes); increase --chunk-size",
+                manifest_json.len(),
+                MANIFEST_MAX_BYTES
+            )));
+        }
+
+        let mut manifest_file = File::create(self.base_path.join("manifest.json"))?;
+        manifest_file.write_all(manifest_json.as_bytes())?;
+
+        let mut sig_file = File::create(self.base_path.join("signatures/manifest.sig"))?;
+        sig_file.write_all(detached_sig)?;
+        Ok(())
+    }
+}
+
+/// Write a complete .trst archive with manifest, signature, and chunk files.
+///
+/// N3: compat / small-caller API — it collects every chunk ciphertext in memory.
+/// Do NOT use it on verify/ingest or large-payload paths; use [`ArchiveWriter`]
+/// to stream writes, and [`validate_archive`] / [`read_manifest`] / per-chunk
+/// streaming to read.
 pub fn write_archive<P: AsRef<Path>>(
     base_dir: P,
     manifest: &TrstManifest,
@@ -423,6 +539,73 @@ mod tests {
     fn test_archive_dir_name() {
         assert_eq!(archive_dir_name("test123"), "clip-test123.seal");
         assert_eq!(archive_dir_name("CAM-001"), "clip-CAM-001.seal");
+    }
+
+    #[test]
+    fn test_archive_writer_streams_readable_archive() {
+        // ArchiveWriter (streaming) must produce an archive read_archive/
+        // validate_archive accept — identical bytes to write_archive for the same
+        // inputs. Push the exact chunks create_test_manifest's segments hash.
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("test.seal");
+        let manifest = create_test_manifest();
+        let chunks: [&[u8]; 3] = [b"test_chunk_0", b"test_chunk_1", b"test_chunk_2"];
+
+        let mut w = ArchiveWriter::create(&archive_path).unwrap();
+        for (i, data) in chunks.iter().enumerate() {
+            let o = w.push_chunk(data).unwrap();
+            assert_eq!(o.index as usize, i);
+            assert_eq!(o.stored_len, data.len());
+            // Hash + continuity match the pre-computed manifest.
+            assert_eq!(hex::encode(o.blake3), manifest.segments[i].blake3_hash);
+            assert_eq!(
+                hex::encode(o.continuity),
+                manifest.segments[i].continuity_hash
+            );
+        }
+        w.finalize(&manifest, b"ed25519:test_signature").unwrap();
+
+        // Reads back and validates like any write_archive output.
+        let (rm, read_chunks) = read_archive(&archive_path).unwrap();
+        assert_eq!(rm.segments.len(), 3);
+        assert_eq!(read_chunks.len(), 3);
+        assert_eq!(read_chunks[1].1, b"test_chunk_1");
+        validate_archive(&archive_path).unwrap();
+    }
+
+    #[test]
+    fn test_archive_writer_rejects_count_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("test.seal");
+        let manifest = create_test_manifest(); // 3 segments
+
+        let mut w = ArchiveWriter::create(&archive_path).unwrap();
+        w.push_chunk(b"only_one").unwrap(); // 1 chunk vs 3 segments
+        let err = w.finalize(&manifest, b"sig").unwrap_err();
+        assert!(matches!(err, ArchiveError::SchemaMismatch(_)));
+    }
+
+    #[test]
+    fn test_archive_writer_finalize_rejects_oversized_manifest() {
+        // SA1 producer guard: a manifest larger than the shared reader cap must be
+        // refused at wrap time (never emit an archive a reader would reject). Bloat
+        // a non-segment field so the check is cheap (no giant chunk fan-out).
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("big.seal");
+        let mut manifest = TrstManifest::new(); // generic, no segments
+        manifest.claims = vec!["x".repeat(MANIFEST_MAX_BYTES + 1)];
+
+        let w = ArchiveWriter::create(&archive_path).unwrap(); // 0 chunks == 0 segments
+        let err = w.finalize(&manifest, b"sig").unwrap_err();
+        match err {
+            ArchiveError::SchemaMismatch(msg) => {
+                assert!(
+                    msg.contains("manifest exceeds the reader cap"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected cap SchemaMismatch, got {other:?}"),
+        }
     }
 
     #[test]
