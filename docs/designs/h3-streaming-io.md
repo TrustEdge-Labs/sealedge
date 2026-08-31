@@ -8,8 +8,11 @@ Project: sealedge — Privacy and trust at the edge.
 
 # H3 — Streaming I/O (constant-memory wrap + bounded reads)
 
-Status: **APPROVED (amendments SA1–SA4 + nits N1–N3 folded in below) —
-P1 ready to build.**
+Status: **IMPLEMENTED** (P1 + P2). Approved with amendments SA1–SA4 + nits
+N1–N3, all folded in below and shipped. Streaming wrap (`ArchiveWriter`) and the
+bounded read paths (stream-hash `validate_archive`, `read_manifest`, streaming
+`unwrap`/`emit-request`/`hash_file`, manifest/sig caps) are implemented; no format
+change, golden vectors + seeded output byte-identical.
 
 The biggest remaining product gap. Two problems, one theme (never hold a whole
 payload in RAM):

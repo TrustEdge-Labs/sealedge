@@ -116,8 +116,8 @@ pub mod primitives;
 pub mod protocols;
 
 pub use archive::{
-    archive_dir_name, read_archive, validate_archive, write_archive, ArchiveError, ArchiveWriter,
-    ChunkOutcome, MANIFEST_MAX_BYTES, SIG_MAX_BYTES,
+    archive_dir_name, read_archive, read_manifest, validate_archive, write_archive, ArchiveError,
+    ArchiveWriter, ChunkOutcome, MANIFEST_MAX_BYTES, SIG_MAX_BYTES,
 };
 pub use asymmetric::{
     decrypt_key_asymmetric, encrypt_key_asymmetric, key_exchange, AsymmetricError, KeyPair,

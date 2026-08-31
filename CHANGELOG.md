@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — H3: streaming I/O (constant-memory wrap + bounded reads)
+
+- **Streaming wrap.** `wrap` no longer holds the payload in memory: a new core
+  `ArchiveWriter` streams one `chunk_size` buffer at a time (read → encrypt →
+  write → segment), dropping peak RAM from ~2× payload to **O(chunk_size)** — the
+  GB-scale edge-camera case now works. No format change; golden vectors and
+  seeded output are byte-identical.
+- **Bounded reads (DoS surface).** `validate_archive` stream-hashes each chunk;
+  `read_manifest` reads the manifest+signature only (no chunk load); `unwrap` and
+  `emit-request` stream one chunk at a time; `hash_file` streams. `verify` no
+  longer double-reads the payload. No verify/ingest path loads a whole archive
+  into memory.
+- **Manifest/signature caps.** `manifest.json` (8 MiB) and the detached signature
+  (4 KiB) are size-capped on read; the **same** `MANIFEST_MAX_BYTES` guards
+  `ArchiveWriter::finalize`, so `wrap` can't emit a manifest a reader would reject
+  (SA1). Threat model **T16** (resource exhaustion).
+
 ### Security — M2: platform signing-key custody
 
 - **Encryption at rest.** The platform Ed25519 signing key (JWKS + the

@@ -381,6 +381,37 @@ a post-compromise forgery.
 - Device-signed self-revocation is not offered — revocation is registry/org-admin
   only (see `docs/designs/h1-phase2-rotation-revocation.md` §1 non-goals).
 
+### T16: Resource Exhaustion — Memory DoS on I/O paths (H3)
+
+**Threat**: A large or hostile input/archive drives unbounded memory use, OOM-ing
+the producer or a verifier/ingest path.
+
+**Attack Vectors**: `wrap` of a GB-scale payload; a crafted archive with an
+enormous `manifest.json` or huge chunk files fed to `verify`/`unwrap`/ingest;
+attestation of an oversized binary/SBOM.
+
+**Status**: MITIGATED (H3)
+
+**Mitigations**:
+- **Streaming wrap**: `wrap` reads the input one `chunk_size` buffer at a time via
+  `ArchiveWriter` and writes each chunk immediately — peak memory is O(chunk_size),
+  not O(payload) (was ~2× payload).
+- **Bounded reads**: `validate_archive` stream-hashes each chunk through a fixed
+  buffer; `unwrap` and `emit-request` process one chunk at a time; `hash_file`
+  streams. No verify/ingest path loads a whole payload into memory.
+- **Manifest/signature caps**: `read_manifest`/`read_archive` reject a
+  `manifest.json` over `MANIFEST_MAX_BYTES` (8 MiB) or a signature over
+  `SIG_MAX_BYTES` (4 KiB), bounding the parse-DoS surface. The **same**
+  `MANIFEST_MAX_BYTES` guards `ArchiveWriter::finalize`, so `wrap` never emits an
+  archive a compliant reader would reject (producer/consumer can't drift).
+
+**Residual risk**:
+- A single chunk is read whole during `unwrap`, so `chunk_size` bounds per-chunk
+  memory — a pathologically large `chunk_size` at wrap time trades memory for
+  fewer segments (operator-chosen, ceilinged by `MAX_CHUNK_SIZE`).
+- The platform HTTP layer's own request-body limit is separate (T-DoS on the
+  network layer, `RequestBodyLimitLayer`); H3 addresses the file/archive paths.
+
 ## RSA Vulnerability History
 
 This section documents the full lifecycle of RUSTSEC-2023-0071 (Marvin Attack) in Sealedge.
@@ -424,6 +455,7 @@ RUSTSEC-2023-0071 was removed from `.cargo/audit.toml`. `cargo-audit` now passes
 | T13: Content confidentiality & recipient access (C4) | MITIGATED | v6.x (C4) |
 | T14: Cross-archive integrity (chronicle + witness, H1) | MITIGATED | v6.x (H1) |
 | T15: Key lifecycle — rotation & revocation (H1 Phase 2) | MITIGATED | v6.x (H1 P2) |
+| T16: Resource exhaustion — memory DoS on I/O paths (H3) | MITIGATED | v6.x (H3) |
 
 ---
 

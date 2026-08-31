@@ -23,7 +23,7 @@ use rand_chacha::ChaCha20Rng;
 use sealedge_core::{
     archive_digest, cek_wrap_info, chunk_aad_v2, decrypt_segment, encrypt_segment,
     format_archive_id, hpke_open_cek, hpke_seal_cek, hpke_seal_cek_with_rng, is_encrypted_key_file,
-    read_archive, recipient_id, seeded_test_rng, segment_hash, sign_manifest, validate_archive,
+    read_manifest, recipient_id, seeded_test_rng, segment_hash, sign_manifest, validate_archive,
     verify_manifest, ArchiveWriter, AudioMetadata, CamVideoMetadata, ChronicleState, ChunkInfo,
     ContentKey, DeviceBundle, DeviceInfo, DeviceKeypair, EncryptionBlock, GenericMetadata,
     HpkeSuite, LogMetadata, PointAttestation, ProfileMetadata, RecipientEntry, RotationRecord,
@@ -31,7 +31,7 @@ use sealedge_core::{
     HPKE_KDF_ID, HPKE_KEM_ID,
 };
 use serde::Serialize;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, BufWriter, Read, Write as _};
 use std::time::Instant;
 // Shared wire types from sealedge-types (accessed via sealedge-core re-export or directly).
 // SegmentRef, VerifyOptions, VerifyRequest use the shared canonical definitions.
@@ -1242,8 +1242,9 @@ fn handle_verify(args: VerifyCmd) -> Result<()> {
     // Initialize report with defaults
     let mut report = VerifyReport::default();
 
-    // Handle IO/Schema errors (exit 12)
-    let (manifest, _chunks) = match read_archive(&args.archive) {
+    // Handle IO/Schema errors (exit 12). Manifest-only (H3 SA2): the chunk hashing
+    // happens in validate_archive (streamed) — don't load chunk bytes here.
+    let (manifest, _sig) = match read_manifest(&args.archive) {
         Ok(data) => data,
         Err(e) => {
             report.error = Some(format!("Archive read failed: {}", e));
@@ -1421,8 +1422,8 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     // Load the recipient's V2 key bundle (device owner OR an auditor/insurer).
     let bundle = load_bundle(&args.device_key, args.unencrypted)?;
 
-    // Read archive
-    let (manifest, chunks) = read_archive(&args.archive)
+    // Read the manifest only (bounded); chunks are streamed during recovery below.
+    let (manifest, _sig) = read_manifest(&args.archive)
         .with_context(|| format!("Failed to read archive: {}", args.archive.display()))?;
 
     // Version dispatch (M3) before any signature check.
@@ -1479,16 +1480,13 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     }
     eprintln!("Continuity: PASS");
 
-    // Recover content. Sign-only archives store plaintext chunks; encrypted
-    // archives require HPKE-opening the CEK with our recipient key.
-    let mut output_data: Vec<u8> = Vec::new();
-    match &manifest.encryption {
-        None => {
-            // Sign-only: chunks are stored as plaintext.
-            for (_index, chunk_bytes) in &chunks {
-                output_data.extend_from_slice(chunk_bytes);
-            }
-        }
+    // Recover content by STREAMING one chunk at a time from disk to the output
+    // file (H3) — never materializing the whole payload. Sign-only archives store
+    // plaintext chunks; encrypted archives HPKE-open the CEK once, then decrypt
+    // each chunk as it is read. validate_archive above already confirmed every
+    // chunk exists, hashes, and chains, so the reads here are on trusted files.
+    let decrypt_ctx: Option<(ContentKey, [u8; 32])> = match &manifest.encryption {
+        None => None,
         Some(enc) => {
             // Find the recipient entry matching our X25519 key.
             let my_pub = bundle.key_agreement.public_string();
@@ -1517,45 +1515,61 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
                 code: 1,
                 message: format!("Failed to unwrap content key: {}", e),
             })?;
-
-            // Borrow (not copy) the recovered CEK; it is zeroized on drop.
-            let key = chacha20poly1305::Key::from_slice(cek.as_bytes());
             let started_at = manifest_started_at(&manifest);
             let chunk_aad =
                 chunk_aad_v2(&manifest.device.public_key, &manifest.profile, &started_at);
+            Some((cek, chunk_aad))
+        }
+    };
 
-            for (index, chunk_bytes) in &chunks {
-                if chunk_bytes.len() < 24 {
+    let chunks_dir = args.archive.join("chunks");
+    let out_file = fs::File::create(&args.output)
+        .with_context(|| format!("Failed to write output: {}", args.output.display()))?;
+    let mut writer = BufWriter::new(out_file);
+    let chunk_count = manifest.segments.len();
+    let mut total_bytes: usize = 0;
+
+    for index in 0..chunk_count {
+        let chunk_path = chunks_dir.join(format!("{index:05}.bin"));
+        let stored = fs::read(&chunk_path)
+            .with_context(|| format!("Failed to read chunk: {}", chunk_path.display()))?;
+
+        match &decrypt_ctx {
+            None => {
+                writer.write_all(&stored)?;
+                total_bytes += stored.len();
+            }
+            Some((cek, chunk_aad)) => {
+                if stored.len() < 24 {
                     anyhow::bail!(
-                        "Chunk {:05} too short to contain nonce ({} bytes)",
-                        index,
-                        chunk_bytes.len()
+                        "Chunk {index:05} too short to contain nonce ({} bytes)",
+                        stored.len()
                     );
                 }
-                let nonce: [u8; 24] = chunk_bytes[..24].try_into().unwrap();
-                let ciphertext = &chunk_bytes[24..];
+                let nonce: [u8; 24] = stored[..24].try_into().unwrap();
+                let ciphertext = &stored[24..];
+                let key = chacha20poly1305::Key::from_slice(cek.as_bytes());
                 let plaintext =
-                    decrypt_segment(key, &nonce, ciphertext, &chunk_aad).map_err(|e| {
+                    decrypt_segment(key, &nonce, ciphertext, chunk_aad).map_err(|e| {
                         CliExitError {
                             code: 1,
                             message: format!(
-                                "Decryption failed — wrong key or corrupted archive: {}",
-                                e
+                                "Decryption failed — wrong key or corrupted archive: {e}"
                             ),
                         }
                     })?;
-                output_data.extend_from_slice(&plaintext);
+                writer.write_all(&plaintext)?;
+                total_bytes += plaintext.len();
             }
         }
     }
-
-    // Write output file
-    fs::write(&args.output, &output_data)
-        .with_context(|| format!("Failed to write output: {}", args.output.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("Failed to flush output: {}", args.output.display()))?;
 
     // Print summary to stderr
-    eprintln!("Chunks: {}", chunks.len());
-    eprintln!("Bytes: {}", output_data.len());
+    eprintln!("Chunks: {chunk_count}");
+    eprintln!("Bytes: {total_bytes}");
     eprintln!("Output: {}", args.output.display());
 
     Ok(())
@@ -1627,6 +1641,13 @@ fn output_continuity_error(args: &VerifyCmd, report: &VerifyReport) -> Result<()
                 eprintln!("Unreferenced chunk file: {}", error);
                 return Ok(());
             }
+            // H3: a missing chunk is now surfaced by the streamed validate_archive
+            // (it no longer eager-loads chunks); preserve the "Missing chunk file"
+            // message the acceptance tests and users expect.
+            if error.contains("Missing chunk file") {
+                eprintln!("{error}");
+                return Ok(());
+            }
         }
 
         // Extract concise first line for continuity errors
@@ -1674,7 +1695,7 @@ fn resolve_chronicle(
     signing_public_key: &str,
 ) -> Result<Option<ChronicleLink>> {
     if let Some(prev_path) = prev_archive {
-        let (m, _chunks) = read_archive(prev_path)
+        let (m, _sig) = read_manifest(prev_path)
             .with_context(|| format!("Failed to read --prev-archive: {}", prev_path.display()))?;
         let prev_seq = m.sequence.ok_or_else(|| {
             anyhow::anyhow!(
@@ -1841,7 +1862,7 @@ async fn handle_verify_chronicle(args: VerifyChronicleCmd) -> Result<()> {
             continue;
         }
 
-        let (manifest, _chunks) = read_archive(dir).map_err(|e| CliExitError {
+        let (manifest, _sig) = read_manifest(dir).map_err(|e| CliExitError {
             code: 12,
             message: format!("{}: archive read failed: {}", dir.display(), e),
         })?;
@@ -2420,21 +2441,32 @@ fn current_timestamp() -> Result<String> {
 }
 
 async fn handle_emit_request(args: EmitRequestCmd) -> Result<()> {
-    // Read manifest from archive
-    let (manifest, chunks) = read_archive(&args.archive)
+    // Read the manifest only (bounded); hash chunks by streaming each file (H3)
+    // so a large archive is bounded to one buffer, not the whole payload.
+    let (manifest, _sig) = read_manifest(&args.archive)
         .with_context(|| format!("Failed to read archive: {}", args.archive.display()))?;
 
-    // Compute segments by BLAKE3 over each chunk in sorted order
-    let mut segments = Vec::new();
-    for (chunk_index, chunk_data) in chunks.iter() {
+    // Compute segments by BLAKE3 over each chunk file, in index order.
+    let chunks_dir = args.archive.join("chunks");
+    let mut segments = Vec::with_capacity(manifest.segments.len());
+    for index in 0..manifest.segments.len() {
+        let chunk_path = chunks_dir.join(format!("{index:05}.bin"));
+        let mut reader = BufReader::new(
+            fs::File::open(&chunk_path)
+                .with_context(|| format!("Failed to read chunk: {}", chunk_path.display()))?,
+        );
         let mut hasher = Hasher::new();
-        hasher.update(chunk_data);
-        let hash = hasher.finalize();
-        let hash_hex = format!("b3:{}", hex::encode(hash.as_bytes()));
-
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
         segments.push(SegmentRef {
-            index: *chunk_index as u32,
-            hash: hash_hex,
+            index: index as u32,
+            hash: format!("b3:{}", hex::encode(hasher.finalize().as_bytes())),
         });
     }
 

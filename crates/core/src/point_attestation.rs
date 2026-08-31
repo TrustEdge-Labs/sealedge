@@ -112,10 +112,23 @@ pub struct PointAttestation {
 }
 
 /// Hash a file with BLAKE3 and return `"b3:<64-hex-chars>"`.
+///
+/// Streams the file through a fixed 64 KiB buffer (H3) instead of reading it whole
+/// — hashing a large binary/SBOM is bounded to the buffer, not the file size.
 pub fn hash_file(path: &Path) -> Result<String, PointAttestationError> {
-    let bytes = std::fs::read(path)?;
-    let hash = blake3::hash(&bytes);
-    Ok(format!("b3:{}", hash.to_hex()))
+    use std::io::Read as _;
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("b3:{}", hasher.finalize().to_hex()))
 }
 
 impl PointAttestation {

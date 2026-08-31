@@ -176,32 +176,79 @@ pub fn write_archive<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Read a complete .trst archive and return manifest and chunk data
-pub fn read_archive<P: AsRef<Path>>(
-    base_dir: P,
-) -> Result<(TrstManifest, ChunkData), ArchiveError> {
+/// Read at most `max` bytes from `path`, erroring if the file exceeds the cap
+/// (H3 — bounded reads / parse-DoS defense). Reads `max + 1` and rejects if the
+/// extra byte materializes.
+fn read_capped(path: &Path, max: usize) -> Result<Vec<u8>, ArchiveError> {
+    let f = File::open(path)?;
+    let mut buf = Vec::new();
+    f.take(max as u64 + 1).read_to_end(&mut buf)?;
+    if buf.len() > max {
+        return Err(ArchiveError::SchemaMismatch(format!(
+            "{} exceeds the {}-byte cap",
+            path.display(),
+            max
+        )));
+    }
+    Ok(buf)
+}
+
+/// BLAKE3-hash a chunk file by streaming it through a fixed 64 KiB buffer (H3) —
+/// bounded RAM regardless of chunk size. Matches [`crate::chain::segment_hash`]
+/// (plain BLAKE3 of the file bytes).
+fn stream_hash_chunk(path: &Path) -> Result<[u8; 32], ArchiveError> {
+    let f = File::open(path)?;
+    let mut reader = std::io::BufReader::new(f);
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Read and parse `manifest.json` + the detached signature only — bounded and
+/// chunk-free (H3). This is the read path for callers that need the manifest but
+/// not the payload (`verify` peek, `verify-chronicle`, `wrap --prev-archive`);
+/// it does NOT load any chunk bytes, so it is safe on the ingest/DoS surface.
+///
+/// Both files are size-capped ([`MANIFEST_MAX_BYTES`] / [`SIG_MAX_BYTES`]), and
+/// the embedded-vs-detached signature consistency check is preserved (SA4), so
+/// swapping callers off `read_archive` changes no read semantics.
+pub fn read_manifest<P: AsRef<Path>>(base_dir: P) -> Result<(TrstManifest, Vec<u8>), ArchiveError> {
     let base_path = base_dir.as_ref();
 
-    // Read and parse manifest.json
-    let manifest_path = base_path.join("manifest.json");
-    let mut manifest_file = File::open(manifest_path)?;
-    let mut manifest_content = String::new();
-    manifest_file.read_to_string(&mut manifest_content)?;
-    let manifest: TrstManifest = serde_json::from_str(&manifest_content)?;
+    let manifest_bytes = read_capped(&base_path.join("manifest.json"), MANIFEST_MAX_BYTES)?;
+    let manifest: TrstManifest = serde_json::from_slice(&manifest_bytes)?;
 
-    // Read detached signature
-    let sig_path = base_path.join("signatures/manifest.sig");
-    let mut sig_file = File::open(sig_path)?;
-    let mut detached_sig = Vec::new();
-    sig_file.read_to_end(&mut detached_sig)?;
+    let detached_sig = read_capped(&base_path.join("signatures/manifest.sig"), SIG_MAX_BYTES)?;
 
-    // Validate signature consistency
     if let Some(ref embedded_sig) = manifest.signature {
         let detached_sig_str = String::from_utf8_lossy(&detached_sig);
         if embedded_sig != &detached_sig_str {
             return Err(ArchiveError::SignatureMismatch);
         }
     }
+
+    Ok((manifest, detached_sig))
+}
+
+/// Read a complete .trst archive and return manifest and chunk data.
+///
+/// N3: compat / small-caller API — it loads EVERY chunk into memory. Do NOT use
+/// it on verify/ingest or large-payload paths; use [`validate_archive`] (stream-
+/// hashes), [`read_manifest`] (manifest only), or a per-chunk stream instead.
+pub fn read_archive<P: AsRef<Path>>(
+    base_dir: P,
+) -> Result<(TrstManifest, ChunkData), ArchiveError> {
+    let base_path = base_dir.as_ref();
+
+    // Manifest + signature (bounded, sig-consistency checked).
+    let (manifest, _detached_sig) = read_manifest(base_path)?;
 
     // Read chunk files
     let chunks_dir = base_path.join("chunks");
@@ -235,10 +282,15 @@ pub fn read_archive<P: AsRef<Path>>(
     Ok((manifest, chunk_data))
 }
 
-/// Validate archive integrity including continuity chain
+/// Validate archive integrity including continuity chain.
+///
+/// H3: reads the manifest bounded ([`read_manifest`]) and **stream-hashes** each
+/// chunk file through a fixed buffer — it never loads the payload into memory, so
+/// verification is bounded to one buffer regardless of archive size (closes the
+/// unbounded-read DoS on the verify path).
 pub fn validate_archive<P: AsRef<Path>>(base_dir: P) -> Result<(), ArchiveError> {
     let base_path = base_dir.as_ref();
-    let (manifest, chunk_data) = read_archive(base_path)?;
+    let (manifest, _sig) = read_manifest(base_path)?;
 
     // Check for unreferenced chunk files (SEC-02)
     let expected_chunks: HashSet<String> = manifest
@@ -263,15 +315,26 @@ pub fn validate_archive<P: AsRef<Path>>(base_dir: P) -> Result<(), ArchiveError>
         ArchiveError::ValidationFailed(format!("Manifest validation failed: {}", e))
     })?;
 
-    // Validate chunk hashes and continuity chain
-    let mut chain_segments = Vec::new();
+    // Validate chunk hashes and continuity chain, stream-hashing each chunk.
+    let mut chain_segments = Vec::with_capacity(manifest.segments.len());
 
-    for ((index, chunk_bytes), segment) in chunk_data.iter().zip(manifest.segments.iter()) {
-        // Compute BLAKE3 hash of chunk
-        let computed_hash = crate::chain::segment_hash(chunk_bytes);
+    for (index, segment) in manifest.segments.iter().enumerate() {
+        let chunk_filename = format!("{:05}.bin", index);
+        let chunk_path = chunks_dir.join(&chunk_filename);
+
+        if !chunk_path.exists() {
+            return Err(ArchiveError::MissingChunk(chunk_filename));
+        }
+        if segment.chunk_file != chunk_filename {
+            return Err(ArchiveError::InvalidChunkIndex {
+                expected: index,
+                found: parse_chunk_index(&segment.chunk_file)?,
+            });
+        }
+
+        // Stream-hash the chunk (bounded RAM) and match the stored hash.
+        let computed_hash = stream_hash_chunk(&chunk_path)?;
         let computed_hash_hex = hex::encode(computed_hash);
-
-        // Check if stored hash matches computed hash
         if segment.blake3_hash != computed_hash_hex {
             return Err(ArchiveError::ValidationFailed(format!(
                 "Chunk {} hash mismatch: expected {}, computed {}",
@@ -286,19 +349,17 @@ pub fn validate_archive<P: AsRef<Path>>(base_dir: P) -> Result<(), ArchiveError>
                 segment.continuity_hash
             ))
         })?;
-
         if stored_continuity.len() != 32 {
             return Err(ArchiveError::ValidationFailed(format!(
                 "Continuity hash must be 32 bytes, got {}",
                 stored_continuity.len()
             )));
         }
-
         let mut continuity_array = [0u8; 32];
         continuity_array.copy_from_slice(&stored_continuity);
 
         chain_segments.push(crate::chain::ChainSegment {
-            index: *index,
+            index,
             stored_hash: computed_hash,
             stored_continuity: continuity_array,
         });
@@ -583,6 +644,57 @@ mod tests {
         w.push_chunk(b"only_one").unwrap(); // 1 chunk vs 3 segments
         let err = w.finalize(&manifest, b"sig").unwrap_err();
         assert!(matches!(err, ArchiveError::SchemaMismatch(_)));
+    }
+
+    #[test]
+    fn test_read_manifest_rejects_oversized_manifest_file() {
+        // H3 reader cap: a manifest.json over MANIFEST_MAX_BYTES is refused before
+        // parsing (parse-DoS defense). Write an oversized file directly.
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("big.seal");
+        fs::create_dir_all(archive_path.join("signatures")).unwrap();
+        fs::write(
+            archive_path.join("manifest.json"),
+            vec![b'x'; MANIFEST_MAX_BYTES + 1],
+        )
+        .unwrap();
+        fs::write(archive_path.join("signatures/manifest.sig"), b"sig").unwrap();
+
+        let err = read_manifest(&archive_path).unwrap_err();
+        match err {
+            ArchiveError::SchemaMismatch(msg) => assert!(msg.contains("cap"), "got: {msg}"),
+            other => panic!("expected cap SchemaMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_read_manifest_roundtrips_and_checks_sig() {
+        // read_manifest returns the manifest + sig without loading chunks, and
+        // preserves the embedded-vs-detached signature consistency check (SA4).
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("m.seal");
+        let manifest = create_test_manifest();
+        let chunks = vec![
+            b"test_chunk_0".to_vec(),
+            b"test_chunk_1".to_vec(),
+            b"test_chunk_2".to_vec(),
+        ];
+        write_archive(&archive_path, &manifest, chunks, b"ed25519:test_signature").unwrap();
+
+        let (m, sig) = read_manifest(&archive_path).unwrap();
+        assert_eq!(m.segments.len(), 3);
+        assert_eq!(sig, b"ed25519:test_signature");
+
+        // Corrupt the detached sig → SA4 consistency check fires.
+        fs::write(
+            archive_path.join("signatures/manifest.sig"),
+            b"ed25519:different",
+        )
+        .unwrap();
+        assert!(matches!(
+            read_manifest(&archive_path),
+            Err(ArchiveError::SignatureMismatch)
+        ));
     }
 
     #[test]
