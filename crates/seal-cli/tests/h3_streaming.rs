@@ -117,6 +117,73 @@ fn large_input_streams_verifies_and_roundtrips() {
         .assert()
         .success();
     assert_eq!(fs::read(&out).unwrap(), data, "unwrap(wrap(x)) == x");
+
+    // F2: a successful unwrap leaves no `.partial` temp behind (rename + disarm).
+    let leftover = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().contains(".partial"));
+    assert!(!leftover, "unwrap left a .partial temp after success");
+}
+
+/// F2: a *failed* unwrap must not leave a partial/truncated output that could be
+/// mistaken for a complete recovery. Point `--out` at an existing directory so the
+/// streamed write to the temp succeeds but the finalizing rename fails; the
+/// TempFileGuard must delete the temp, leaving nothing behind.
+#[test]
+fn unwrap_failure_leaves_no_partial_output() {
+    let dir = TempDir::new().unwrap();
+    let _ed = keygen(dir.path(), "device");
+    let key = dir.path().join("device.key");
+
+    let data = payload(64 * 1024);
+    let input = dir.path().join("in.bin");
+    fs::write(&input, &data).unwrap();
+    let archive = dir.path().join("a.seal");
+    seal()
+        .args([
+            "wrap",
+            "--unencrypted",
+            "--in",
+            input.to_str().unwrap(),
+            "--out",
+            archive.to_str().unwrap(),
+            "--device-key",
+            key.to_str().unwrap(),
+            "--chunk-size",
+            "4096",
+        ])
+        .assert()
+        .success();
+
+    // --out is an existing directory: decrypt + streamed write succeed, but the
+    // final rename (file over a directory) fails.
+    let out_dir = dir.path().join("out_is_a_dir");
+    fs::create_dir(&out_dir).unwrap();
+    seal()
+        .args([
+            "unwrap",
+            archive.to_str().unwrap(),
+            "--device-key",
+            key.to_str().unwrap(),
+            "--out",
+            out_dir.to_str().unwrap(),
+            "--unencrypted",
+        ])
+        .assert()
+        .failure();
+
+    // The temp is a sibling of --out; assert none survives the failure.
+    let leftover: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".partial"))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "partial temp not cleaned up: {leftover:?}"
+    );
+    assert!(out_dir.is_dir(), "output directory should be untouched");
 }
 
 #[test]

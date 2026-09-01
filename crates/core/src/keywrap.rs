@@ -34,6 +34,7 @@ use hpke::{
 };
 use pbkdf2::pbkdf2_hmac;
 use rand_core::{CryptoRng, OsRng, RngCore, SeedableRng};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret as XSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -407,6 +408,19 @@ pub struct DeviceBundle {
     pub key_agreement: KeyAgreementKeypair,
 }
 
+/// The on-the-wire secret payload of a `SEALEDGE-KEY-V2` bundle. Kept as a
+/// dedicated `ZeroizeOnDrop` struct (rather than a `serde_json::Value`) so both
+/// secret strings are wiped from the heap when this value is dropped — on the
+/// decrypt/import path, on the serialize/export path, and on any error in
+/// between. This closes the M2 zeroization gap where the intermediate
+/// `serde_json::Value` and its owned `String`s lingered unzeroed.
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+struct BundleSecrets {
+    version: u8,
+    ed25519_secret: String,
+    x25519_secret: String,
+}
+
 impl DeviceBundle {
     /// Generate a fresh device bundle (independent signing + key-agreement keys).
     pub fn generate() -> Result<Self, CryptoError> {
@@ -427,28 +441,32 @@ impl DeviceBundle {
     }
 
     /// Plaintext JSON of both secrets (for CI `--unencrypted`; never production).
-    pub fn to_plaintext(&self) -> String {
-        serde_json::json!({
-            "version": 2,
-            "ed25519_secret": self.signing.export_secret(),
-            "x25519_secret": self.key_agreement.export_secret(),
-        })
-        .to_string()
+    ///
+    /// Returns a [`Zeroizing<String>`] so the serialized secrets are wiped when
+    /// the caller drops the buffer. The `export_secret()` strings are *moved*
+    /// into the [`BundleSecrets`] (which is `ZeroizeOnDrop`), so no unzeroed copy
+    /// survives serialization.
+    pub fn to_plaintext(&self) -> Zeroizing<String> {
+        let secrets = BundleSecrets {
+            version: 2,
+            ed25519_secret: self.signing.export_secret(),
+            x25519_secret: self.key_agreement.export_secret(),
+        };
+        // serde_json writes straight into the output buffer; wrap it so it wipes.
+        Zeroizing::new(
+            serde_json::to_string(&secrets).expect("BundleSecrets serialization is infallible"),
+        )
     }
 
     /// Parse a plaintext bundle produced by [`DeviceBundle::to_plaintext`].
     pub fn from_plaintext(s: &str) -> Result<Self, CryptoError> {
-        let v: serde_json::Value = serde_json::from_str(s)
+        // Deserialize into a ZeroizeOnDrop struct; its secret strings are wiped
+        // when `secrets` drops at the end of this function.
+        let secrets: BundleSecrets = serde_json::from_str(s)
             .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid bundle JSON: {e}")))?;
-        let ed = v["ed25519_secret"]
-            .as_str()
-            .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing ed25519_secret".into()))?;
-        let x = v["x25519_secret"]
-            .as_str()
-            .ok_or_else(|| CryptoError::InvalidKeyFormat("Missing x25519_secret".into()))?;
         Ok(Self {
-            signing: DeviceKeypair::import_secret(ed)?,
-            key_agreement: KeyAgreementKeypair::import_secret(x)?,
+            signing: DeviceKeypair::import_secret(&secrets.ed25519_secret)?,
+            key_agreement: KeyAgreementKeypair::import_secret(&secrets.x25519_secret)?,
         })
     }
 
@@ -468,11 +486,11 @@ impl DeviceBundle {
             .map_err(|e| CryptoError::EncryptionFailed(format!("AES key init: {e}")))?;
         derived_key.zeroize();
 
-        let mut plaintext = self.to_plaintext();
+        // Zeroizing<String>: wiped on drop at the end of this function.
+        let plaintext = self.to_plaintext();
         let ciphertext = cipher
             .encrypt(AesGcmNonce::from_slice(&nonce_bytes), plaintext.as_bytes())
             .map_err(|e| CryptoError::EncryptionFailed(format!("AES-GCM encrypt: {e}")))?;
-        plaintext.zeroize();
 
         let metadata = serde_json::json!({
             "version": 2,
@@ -549,14 +567,18 @@ impl DeviceBundle {
             .map_err(|e| CryptoError::EncryptionFailed(format!("AES key init: {e}")))?;
         derived_key.zeroize();
 
-        let plaintext = cipher
-            .decrypt(AesGcmNonce::from_slice(&nonce_bytes), ciphertext)
-            .map_err(|_| {
-                CryptoError::DecryptionFailed("Wrong passphrase or corrupted bundle".into())
-            })?;
-        let plaintext_str = String::from_utf8(plaintext)
+        // Zeroizing<Vec<u8>>: the decrypted secret JSON is wiped on drop. Validate
+        // UTF-8 by borrow so no separate owned String copy of the secrets is made.
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(AesGcmNonce::from_slice(&nonce_bytes), ciphertext)
+                .map_err(|_| {
+                    CryptoError::DecryptionFailed("Wrong passphrase or corrupted bundle".into())
+                })?,
+        );
+        let plaintext_str = std::str::from_utf8(&plaintext)
             .map_err(|_| CryptoError::DecryptionFailed("Bundle plaintext not UTF-8".into()))?;
-        Self::from_plaintext(&plaintext_str)
+        Self::from_plaintext(plaintext_str)
     }
 }
 
@@ -695,6 +717,15 @@ mod tests {
     fn signing_key_zeroizes_on_drop() {
         fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
         assert_zeroize_on_drop::<ed25519_dalek::SigningKey>();
+    }
+
+    /// F1: the serialized bundle secrets must wipe on drop. Compile-time guard —
+    /// if `BundleSecrets` loses its `ZeroizeOnDrop` derive (reintroducing the
+    /// unzeroed serde_json::Value leak on import/export), this fails to build.
+    #[test]
+    fn bundle_secrets_zeroizes_on_drop() {
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<BundleSecrets>();
     }
 
     #[test]

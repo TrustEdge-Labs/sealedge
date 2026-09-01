@@ -20,7 +20,7 @@ use pbkdf2::pbkdf2_hmac;
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
 use sha2::Sha256;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub use crate::error::CryptoError;
 
@@ -261,9 +261,10 @@ impl DeviceKeypair {
         derived_key.zeroize();
 
         let nonce = AesGcmNonce::from_slice(&nonce_bytes);
-        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        // Zeroizing: wipe the decrypted raw private key from the heap on drop.
+        let plaintext = Zeroizing::new(cipher.decrypt(nonce, ciphertext).map_err(|_| {
             CryptoError::DecryptionFailed("Wrong passphrase or corrupted key file".into())
-        })?;
+        })?);
 
         if plaintext.len() != 32 {
             return Err(CryptoError::InvalidKeyFormat(

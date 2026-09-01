@@ -30,10 +30,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let signing_public_key = bundle.signing.public.clone();
     let key_agreement_public = bundle.key_agreement.public_string();
 
-    fs::write(
-        "examples/cam.video/device.key",
-        format!("{}\n", bundle.to_plaintext()),
-    )?;
+    // to_plaintext() returns Zeroizing<String> (no Display, by design); append the
+    // newline into the buffer and write its bytes.
+    let mut key_pt = bundle.to_plaintext();
+    key_pt.push('\n');
+    fs::write("examples/cam.video/device.key", key_pt.as_bytes())?;
     fs::write("examples/cam.video/device.pub", bundle.public_lines())?;
 
     println!("Generated device key bundle (SEALEDGE-KEY-V2):");

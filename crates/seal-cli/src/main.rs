@@ -33,6 +33,7 @@ use sealedge_core::{
 use serde::Serialize;
 use std::io::{BufReader, BufWriter, Read, Write as _};
 use std::time::Instant;
+use zeroize::Zeroizing;
 // Shared wire types from sealedge-types (accessed via sealedge-core re-export or directly).
 // SegmentRef, VerifyOptions, VerifyRequest use the shared canonical definitions.
 use sealedge_types::verification::{SegmentRef, VerifyOptions, VerifyRequest};
@@ -583,14 +584,20 @@ fn handle_keygen(args: KeygenCmd) -> Result<()> {
     let bundle = DeviceBundle::generate()?;
 
     if args.unencrypted {
-        fs::write(&args.out_key, format!("{}\n", bundle.to_plaintext()))
+        // Append the newline into the zeroizing buffer (no unzeroed format! copy).
+        let mut pt = bundle.to_plaintext();
+        pt.push('\n');
+        fs::write(&args.out_key, pt.as_bytes())
             .with_context(|| format!("Failed to write secret key: {}", args.out_key.display()))?;
     } else {
-        let passphrase =
-            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?;
-        let confirm = rpassword::prompt_password("Confirm passphrase: ")
-            .context("Failed to read passphrase confirmation")?;
-        if passphrase != confirm {
+        let passphrase = Zeroizing::new(
+            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?,
+        );
+        let confirm = Zeroizing::new(
+            rpassword::prompt_password("Confirm passphrase: ")
+                .context("Failed to read passphrase confirmation")?,
+        );
+        if *passphrase != *confirm {
             anyhow::bail!("Passphrases do not match");
         }
         let encrypted = bundle
@@ -636,8 +643,9 @@ fn load_bundle(path: &Path, unencrypted: bool) -> Result<DeviceBundle> {
         if unencrypted {
             anyhow::bail!("Cannot use --unencrypted with an encrypted key bundle");
         }
-        let passphrase =
-            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?;
+        let passphrase = Zeroizing::new(
+            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?,
+        );
         return DeviceBundle::import_encrypted(&bytes, &passphrase)
             .map_err(|e| anyhow::anyhow!("Failed to decrypt key bundle: {}", e));
     }
@@ -670,8 +678,9 @@ fn load_signing_keypair(path: &Path, unencrypted: bool) -> Result<DeviceKeypair>
         if unencrypted {
             anyhow::bail!("Cannot use --unencrypted with an encrypted key bundle");
         }
-        let passphrase =
-            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?;
+        let passphrase = Zeroizing::new(
+            rpassword::prompt_password("Passphrase: ").context("Failed to read passphrase")?,
+        );
         return DeviceBundle::import_encrypted(&bytes, &passphrase)
             .map(|b| b.signing)
             .map_err(|e| anyhow::anyhow!("Failed to decrypt key bundle: {}", e));
@@ -687,8 +696,10 @@ fn load_signing_keypair(path: &Path, unencrypted: bool) -> Result<DeviceKeypair>
     }
 
     if is_encrypted_key_file(&bytes) {
-        let passphrase = rpassword::prompt_password("Enter passphrase for device key: ")
-            .context("Failed to read passphrase")?;
+        let passphrase = Zeroizing::new(
+            rpassword::prompt_password("Enter passphrase for device key: ")
+                .context("Failed to read passphrase")?,
+        );
         return DeviceKeypair::import_secret_encrypted(&bytes, &passphrase)
             .map_err(|e| anyhow::anyhow!("Failed to decrypt key: {}", e));
     }
@@ -714,13 +725,19 @@ fn load_or_generate_bundle(
             let secret_path = PathBuf::from("device.key");
             let public_path = PathBuf::from("device.pub");
             if unencrypted {
-                fs::write(&secret_path, format!("{}\n", bundle.to_plaintext()))?;
+                let mut pt = bundle.to_plaintext();
+                pt.push('\n');
+                fs::write(&secret_path, pt.as_bytes())?;
             } else {
-                let passphrase = rpassword::prompt_password("Passphrase: ")
-                    .context("Failed to read passphrase")?;
-                let confirm = rpassword::prompt_password("Confirm passphrase: ")
-                    .context("Failed to read passphrase confirmation")?;
-                if passphrase != confirm {
+                let passphrase = Zeroizing::new(
+                    rpassword::prompt_password("Passphrase: ")
+                        .context("Failed to read passphrase")?,
+                );
+                let confirm = Zeroizing::new(
+                    rpassword::prompt_password("Confirm passphrase: ")
+                        .context("Failed to read passphrase confirmation")?,
+                );
+                if *passphrase != *confirm {
                     anyhow::bail!("Passphrases do not match");
                 }
                 let encrypted = bundle
@@ -1415,6 +1432,44 @@ fn handle_verify(args: VerifyCmd) -> Result<()> {
     Ok(())
 }
 
+/// A process-unique temp path in the same directory as `output`, so the recovered
+/// file can be finalized with an atomic same-filesystem rename (F2).
+fn unwrap_tmp_path(output: &Path) -> PathBuf {
+    let mut name = output
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".seal-unwrap.{}.partial", std::process::id()));
+    match output.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+/// Deletes a partially-written file on drop unless [`TempFileGuard::disarm`] is
+/// called first. Makes `unwrap` all-or-nothing (F2): any early return leaves no
+/// truncated output that could be mistaken for a complete recovery.
+struct TempFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = &self.path {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
+
 fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     if args.unencrypted {
         warn_unencrypted();
@@ -1523,8 +1578,15 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     };
 
     let chunks_dir = args.archive.join("chunks");
-    let out_file = fs::File::create(&args.output)
-        .with_context(|| format!("Failed to write output: {}", args.output.display()))?;
+
+    // F2: recover to a temp sibling, then atomically rename on success. A guard
+    // deletes the temp on any early return (I/O error, disk full, AEAD failure),
+    // so unwrap stays all-or-nothing — a partial recovery is never left behind
+    // where it could be mistaken for a complete one.
+    let tmp_path = unwrap_tmp_path(&args.output);
+    let mut cleanup = TempFileGuard::new(tmp_path.clone());
+    let out_file = fs::File::create(&tmp_path)
+        .with_context(|| format!("Failed to create temp output: {}", tmp_path.display()))?;
     let mut writer = BufWriter::new(out_file);
     let chunk_count = manifest.segments.len();
     let mut total_bytes: usize = 0;
@@ -1565,7 +1627,11 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
     }
     writer
         .flush()
-        .with_context(|| format!("Failed to flush output: {}", args.output.display()))?;
+        .with_context(|| format!("Failed to flush output: {}", tmp_path.display()))?;
+    drop(writer); // close the temp file before renaming it into place
+    fs::rename(&tmp_path, &args.output)
+        .with_context(|| format!("Failed to finalize output: {}", args.output.display()))?;
+    cleanup.disarm();
 
     // Print summary to stderr
     eprintln!("Chunks: {chunk_count}");
