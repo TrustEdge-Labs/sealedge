@@ -1,0 +1,96 @@
+# Copyright (c) 2025 TRUSTEDGE LABS LLC
+# MPL-2.0: https://mozilla.org/MPL/2.0/
+# Project: trustedge — Privacy and trust at the edge.
+#
+# Weekly `cargo update`: refresh the lockfile within semver, validate it inline
+# (build + tests + clippy + audit), and open a PR only if it changed AND passed.
+# This turns dependency/advisory drift into a routine, pre-checked PR you glance
+# at and merge — instead of a surprise red `main` weeks later. Runs on the pinned
+# toolchain (rust-toolchain.toml), so this job tests dep drift, not compiler drift.
+#
+# The PR is opened with GITHUB_TOKEN, which by design does NOT re-trigger CI on the
+# new PR — that's why this job validates inline before opening it. Merging to main
+# still runs the full CI (ci.yml push trigger) as the real gate.
+
+name: Weekly dependency update
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  schedule:
+    - cron: '0 7 * * 1' # Monday 07:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable (pinned by rust-toolchain.toml)
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@5e35b238ee3d0a48aa25ae877adcff74a6ddd2e0 # cargo-audit
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpcsclite-dev libdbus-1-dev pkg-config pkgconf
+
+      - name: Update dependencies within semver
+        run: cargo update
+
+      - name: Stop early if nothing changed
+        id: diff
+        run: |
+          if git diff --quiet Cargo.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No dependency updates this week."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "## Lockfile changes" >> "$GITHUB_STEP_SUMMARY"
+            git diff --stat Cargo.lock >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Validate the updated lockfile inline so the PR we open is already green.
+      - name: Build workspace
+        if: steps.diff.outputs.changed == 'true'
+        run: cargo build --workspace
+
+      - name: Test workspace
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          cargo test --workspace --no-default-features
+          cargo test -p sealedge-core --features "audio,git-attestation,keyring,insecure-tls"
+
+      - name: Clippy
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          cargo clippy -p sealedge-core --all-targets --all-features -- -D warnings
+          cargo clippy -p sealedge-seal-cli --all-targets -- -D warnings
+
+      - name: Security audit
+        if: steps.diff.outputs.changed == 'true'
+        run: cargo audit
+
+      - name: Open pull request
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="deps/weekly-update-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add Cargo.lock
+          git commit -m "chore(deps): weekly cargo update"
+          git push -u origin "$branch"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "chore(deps): weekly cargo update" \
+            --body "Automated \`cargo update\` (semver-compatible lockfile refresh).
+
+          Validated inline by this job on the pinned toolchain: workspace build, tests, \`clippy -D warnings\`, and \`cargo audit\` all passed. Glance at the lockfile diff and merge — merging to \`main\` runs the full CI (ci.yml) as the real gate.
+
+          (CI does not auto-run on this PR because it was opened with \`GITHUB_TOKEN\`; that's why validation ran in the update job.)"

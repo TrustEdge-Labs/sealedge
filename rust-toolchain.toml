@@ -1,0 +1,20 @@
+# Pin the Rust toolchain so a newly-released `stable` can't turn a green tree red
+# with no code change (bit rot). This has bitten us repeatedly: rustix 0.37 (a
+# transitive dep that stopped compiling on newer stable) and the clippy
+# `chunks_exact_to_as_chunks` lint (new in 1.98) both surfaced as "CI red, nothing
+# pushed" — because every workflow requested the floating `stable` channel.
+#
+# rustup honors this file for EVERY cargo/rustc command in the repo. In CI,
+# dtolnay/rust-toolchain still installs `stable` and runs `rustup default stable`
+# (precedence 5); this file is precedence 3 and no RUSTUP_TOOLCHAIN is set, so the
+# pinned version wins for the actual build/test/clippy commands — and local dev
+# uses the same version. rustup auto-installs the toolchain + the components and
+# targets listed below on first use.
+#
+# Bump this deliberately (via the weekly deps-update PR, or by hand) so a compiler
+# change arrives as a reviewed one-line commit, never as a surprise red main.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
