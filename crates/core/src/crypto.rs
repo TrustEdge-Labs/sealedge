@@ -64,20 +64,24 @@ impl DeviceKeypair {
 
     /// Import a keypair from secret key string (accepts "ed25519:BASE64" or hex)
     pub fn import_secret(secret_str: &str) -> Result<Self, CryptoError> {
-        let secret_bytes = if let Some(b64_part) = secret_str.strip_prefix("ed25519:") {
-            // Base64 format
-            BASE64
-                .decode(b64_part)
-                .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid base64: {}", e)))?
-        } else if secret_str.len() == 64 {
-            // Hex format
-            hex::decode(secret_str)
-                .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid hex: {}", e)))?
-        } else {
-            return Err(CryptoError::InvalidKeyFormat(
-                "Must be ed25519:BASE64 or 64-char hex".to_string(),
-            ));
-        };
+        // Zeroizing: the decoded raw key must not linger on the heap after it is
+        // copied into the ZeroizeOnDrop keypair (F1a — last copy on the import path).
+        let secret_bytes = Zeroizing::new(
+            if let Some(b64_part) = secret_str.strip_prefix("ed25519:") {
+                // Base64 format
+                BASE64
+                    .decode(b64_part)
+                    .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid base64: {}", e)))?
+            } else if secret_str.len() == 64 {
+                // Hex format
+                hex::decode(secret_str)
+                    .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid hex: {}", e)))?
+            } else {
+                return Err(CryptoError::InvalidKeyFormat(
+                    "Must be ed25519:BASE64 or 64-char hex".to_string(),
+                ));
+            },
+        );
 
         if secret_bytes.len() != 32 {
             return Err(CryptoError::InvalidKeyFormat(

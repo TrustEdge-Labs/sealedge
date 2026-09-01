@@ -25,7 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns a `Zeroizing<String>`; `import_encrypted` wraps the decrypted buffer
   and validates UTF-8 by borrow (no owned copy). The single-key path
   (`DeviceKeypair::import_secret_encrypted`) wraps its decrypted raw key in
-  `Zeroizing` too, and every CLI passphrase prompt is zeroized on drop.
+  `Zeroizing` too, and every CLI passphrase prompt is zeroized on drop. The final
+  decoded-key copy on the import path (`DeviceKeypair::import_secret`) is now
+  `Zeroizing` as well.
+- **Owner-only key-file writes (no chmod race).** `seal keygen` and the rekey path
+  now write secret key files through a shared core `write_secure` — a
+  `0600`-at-creation temp file renamed over the target — instead of writing with
+  the default umask then `chmod`-ing, which briefly left the key world-readable.
+  This is the custody fix M2 applied to the JWKS key, now extracted to
+  `sealedge-core::secure_file` so the platform and CLI share one implementation
+  (Unix `rename(2)` semantics; a crash may leave an inert `.tmp.<pid>.<seq>` /
+  `.seal-unwrap.<pid>.partial` sibling that is safe to delete).
 - **Atomic `unwrap`.** `seal unwrap` recovers to a temp file and atomically
   renames it into place only on success; a mid-stream failure (I/O error, disk
   full, AEAD failure) now deletes the partial instead of leaving a

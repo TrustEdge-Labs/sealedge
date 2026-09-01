@@ -114,6 +114,7 @@ pub mod applications;
 pub mod io;
 pub mod primitives;
 pub mod protocols;
+pub mod secure_file;
 
 pub use archive::{
     archive_dir_name, read_archive, read_manifest, validate_archive, write_archive, ArchiveError,
@@ -167,6 +168,7 @@ pub use crypto::{
     CryptoError, DeviceKeypair,
 };
 pub use secret::Secret;
+pub use secure_file::write_secure;
 // Ed25519 types re-exported for downstream crates (JWKS, key management)
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 pub use envelope::{Envelope, EnvelopeMetadata};

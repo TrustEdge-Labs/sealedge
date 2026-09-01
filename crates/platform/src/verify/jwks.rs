@@ -16,7 +16,6 @@ use base64::{
 use sealedge_core::{open_secret, seal_secret, SigningKey, VerifyingKey, SEALED_SECRET_HEADER_V1};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::Write as _;
 use std::{fs, path::Path};
 use zeroize::Zeroize as _;
 
@@ -221,7 +220,9 @@ impl KeyManager {
                 let blob = seal_secret(json.as_bytes(), pass)
                     .map_err(|e| anyhow!("failed to encrypt signing key: {e}"))?;
                 json.zeroize();
-                Self::write_secure(Path::new(&self.key_path), &blob)?;
+                sealedge_core::write_secure(Path::new(&self.key_path), &blob).with_context(
+                    || format!("Failed to finalize signing key at {}", self.key_path),
+                )?;
             }
             None => {
                 // Defense in depth: never persist plaintext in a release build,
@@ -237,65 +238,14 @@ impl KeyManager {
                      JWKS_KEY_PASSPHRASE is not set (dev/test only)",
                     self.key_path
                 );
-                let res = Self::write_secure(Path::new(&self.key_path), json.as_bytes());
+                let res = sealedge_core::write_secure(Path::new(&self.key_path), json.as_bytes())
+                    .with_context(|| {
+                        format!("Failed to finalize signing key at {}", self.key_path)
+                    });
                 json.zeroize();
                 res?;
             }
         }
-        Ok(())
-    }
-
-    /// Atomically write `bytes` to `path` with `0600` set **at creation** (no
-    /// world-readable window between write and chmod): write a sibling temp file
-    /// opened with mode 0600, then rename it over the target.
-    fn write_secure(path: &Path, bytes: &[u8]) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory for {}", path.display()))?;
-        }
-        // Unique temp sibling per writer. A fixed ".tmp" name let two concurrent
-        // writers to the same target share one temp file: the first's rename moved
-        // it into place, and the second's rename then failed with "No such file"
-        // ("Failed to finalize signing key ..."). This surfaced as a flaky CI
-        // failure when parallel tests generated the same default key path; it is
-        // also a real hazard for any two processes sharing a JWKS_KEY_PATH.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-        let mut tmp_os = path.as_os_str().to_owned();
-        tmp_os.push(format!(
-            ".tmp.{}.{}",
-            std::process::id(),
-            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let tmp = std::path::PathBuf::from(tmp_os);
-
-        {
-            #[cfg(unix)]
-            let mut f = {
-                use std::os::unix::fs::OpenOptionsExt;
-                fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)
-                    .with_context(|| format!("Failed to create {}", tmp.display()))?
-            };
-            #[cfg(not(unix))]
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)
-                .with_context(|| format!("Failed to create {}", tmp.display()))?;
-
-            f.write_all(bytes)
-                .with_context(|| format!("Failed to write {}", tmp.display()))?;
-            let _ = f.sync_all();
-        }
-
-        fs::rename(&tmp, path)
-            .with_context(|| format!("Failed to finalize signing key at {}", path.display()))?;
         Ok(())
     }
 

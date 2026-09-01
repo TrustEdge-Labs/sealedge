@@ -587,7 +587,7 @@ fn handle_keygen(args: KeygenCmd) -> Result<()> {
         // Append the newline into the zeroizing buffer (no unzeroed format! copy).
         let mut pt = bundle.to_plaintext();
         pt.push('\n');
-        fs::write(&args.out_key, pt.as_bytes())
+        sealedge_core::write_secure(&args.out_key, pt.as_bytes())
             .with_context(|| format!("Failed to write secret key: {}", args.out_key.display()))?;
     } else {
         let passphrase = Zeroizing::new(
@@ -603,17 +603,12 @@ fn handle_keygen(args: KeygenCmd) -> Result<()> {
         let encrypted = bundle
             .export_encrypted(&passphrase)
             .context("Failed to encrypt key bundle")?;
-        fs::write(&args.out_key, &encrypted)
+        sealedge_core::write_secure(&args.out_key, &encrypted)
             .with_context(|| format!("Failed to write secret key: {}", args.out_key.display()))?;
     }
 
-    // Set secret key file to owner-only permissions (0600)
-    #[cfg(unix)]
-    {
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&args.out_key, perms)
-            .with_context(|| format!("Failed to set permissions on {}", args.out_key.display()))?;
-    }
+    // write_secure creates the file 0600-at-creation on Unix (no write-then-chmod
+    // window). On non-Unix it cannot restrict the mode — warn so the operator does.
     #[cfg(not(unix))]
     {
         eprintln!(
@@ -727,7 +722,7 @@ fn load_or_generate_bundle(
             if unencrypted {
                 let mut pt = bundle.to_plaintext();
                 pt.push('\n');
-                fs::write(&secret_path, pt.as_bytes())?;
+                sealedge_core::write_secure(&secret_path, pt.as_bytes())?;
             } else {
                 let passphrase = Zeroizing::new(
                     rpassword::prompt_password("Passphrase: ")
@@ -743,15 +738,9 @@ fn load_or_generate_bundle(
                 let encrypted = bundle
                     .export_encrypted(&passphrase)
                     .context("Failed to encrypt key bundle")?;
-                fs::write(&secret_path, &encrypted)?;
+                sealedge_core::write_secure(&secret_path, &encrypted)?;
             }
-            #[cfg(unix)]
-            {
-                let perms = std::fs::Permissions::from_mode(0o600);
-                std::fs::set_permissions(&secret_path, perms).with_context(|| {
-                    format!("Failed to set permissions on {}", secret_path.display())
-                })?;
-            }
+            // write_secure sets 0600-at-creation on Unix (no chmod window).
             fs::write(&public_path, bundle.public_lines())?;
             Ok((bundle, secret_path, public_path, true))
         }
