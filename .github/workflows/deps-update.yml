@@ -71,7 +71,8 @@ jobs:
 
       - name: Security audit
         if: steps.diff.outputs.changed == 'true'
-        run: cargo audit
+        # --deny warnings to match ci.yml + ci-check.sh (one definition of clean).
+        run: cargo audit --deny warnings
 
       - name: Open pull request
         if: steps.diff.outputs.changed == 'true'

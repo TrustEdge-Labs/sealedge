@@ -30,55 +30,12 @@ jobs:
         with:
           components: rustfmt
 
-      - name: fmt
-        run: cargo fmt --all -- --check
-
-      - name: Copyright headers
-        run: |
-          missing=0
-          while IFS= read -r file; do
-            if ! head -10 "$file" | grep -q "Copyright (c) 2025 TRUSTEDGE LABS LLC"; then
-              echo "Missing copyright header: $file"
-              missing=$((missing + 1))
-            fi
-          done < <(find . -type f \( -name "*.rs" -o -name "*.yml" -o -name "*.yaml" -o -name "*.toml" \) \
-            -not -path "./target/*" -not -path "./.git/*" -not -path "./.planning/*")
-          if [ $missing -gt 0 ]; then
-            echo "::error::$missing files missing copyright headers. Run: ./scripts/fix-copyright.sh"
-            exit 1
-          fi
-
-      - name: TODO hygiene
-        run: |
-          count=$(grep -rn '// TODO\|// FIXME\|// HACK\|// XXX\|todo!()\|unimplemented!()' \
-            --include="*.rs" crates/ 2>/dev/null | wc -l || echo 0)
-          if [ "$count" -gt 0 ]; then
-            echo "::error::Found $count unimplemented TODO/FIXME/HACK/XXX markers"
-            grep -rn '// TODO\|// FIXME\|// HACK\|// XXX\|todo!()\|unimplemented!()' \
-              --include="*.rs" crates/ || true
-            exit 1
-          fi
-
-      - name: Secret struct derive check
-        run: |
-          ok=true
-          for file_struct in \
-            "crates/core/src/backends/yubikey.rs:YubiKeyConfig" \
-            "crates/core/src/backends/software_hsm.rs:SoftwareHsmConfig" \
-            "crates/platform/src/ca/models.rs:LoginRequest" \
-            "crates/platform/src/ca/mod.rs:CAConfig"; do
-            FILE="${file_struct%%:*}"
-            STRUCT="${file_struct##*:}"
-            if grep -B2 "pub struct $STRUCT" "$FILE" | grep -q "Serialize"; then
-              echo "::error::$STRUCT in $FILE has Serialize derive (forbidden on secret-holding structs)"
-              ok=false
-            fi
-            if ! grep -q "REDACTED" "$FILE"; then
-              echo "::error::$STRUCT in $FILE missing [REDACTED] in Debug impl"
-              ok=false
-            fi
-          done
-          [ "$ok" = true ]
+      # Copyright, fmt, TODO hygiene, and the secret-struct-derive guard all run
+      # from the single source of truth — scripts/ci-check.sh --fast — so this job,
+      # the pre-push hook, and local runs cannot drift apart (F4). --fast skips the
+      # heavy build/clippy/test steps; those run in the build-and-test job below.
+      - name: Static lint checks (ci-check.sh --fast)
+        run: ./scripts/ci-check.sh --fast
 
       - name: Setup Node.js for dashboard checks
         if: hashFiles('web/dashboard/package.json') != ''
@@ -167,7 +124,10 @@ jobs:
       - uses: taiki-e/install-action@5e35b238ee3d0a48aa25ae877adcff74a6ddd2e0 # cargo-audit
 
       - name: Security audit
-        run: cargo audit
+        # --deny warnings: fail on any advisory (vulnerability OR informational
+        # warning e.g. yanked/unmaintained) unless accepted in .cargo/audit.toml.
+        # Matches ci-check.sh and deps-update.yml — one definition of "audit clean".
+        run: cargo audit --deny warnings
 
   # ── Self-attestation (release tags only) ─────────────────────
   self-attestation:

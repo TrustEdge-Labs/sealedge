@@ -3,12 +3,16 @@
 # MPL-2.0: https://mozilla.org/MPL/2.0/
 # Project: sealedge — Privacy and trust at the edge.
 #
-# Local CI check — mirrors .github/workflows/ci.yml
+# Local CI gate. The static lint checks (--fast: copyright, fmt, TODO hygiene,
+# secret-struct-derive) are the SINGLE SOURCE OF TRUTH: ci.yml's `lint` job invokes
+# `--fast` and the pre-push hook runs it, so those cannot drift by construction.
+# The heavier steps (clippy, build, tests, wasm, audit) mirror ci.yml's
+# build-and-test and security jobs — keep them in sync when either changes.
 # Run before pushing to catch issues without burning GH Actions minutes.
 #
 # Usage:
 #   ./scripts/ci-check.sh          # Full suite, incremental (default)
-#   ./scripts/ci-check.sh --clean  # Full clean build (matches CI exactly)
+#   ./scripts/ci-check.sh --clean  # Full suite from a clean build cache
 #   ./scripts/ci-check.sh --fast   # Static lint checks only (copyright, fmt,
 #                                  #   TODO, secret-derive) — no compile. This is
 #                                  #   what the pre-push hook runs.
