@@ -95,8 +95,9 @@ impl AudioChunk {
         }
 
         let mut data = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        // len is a multiple of 4 (checked above), so as_chunks leaves no remainder.
+        for chunk in bytes.as_chunks::<4>().0 {
+            let sample = f32::from_le_bytes(*chunk);
             data.push(sample);
         }
 

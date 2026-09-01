@@ -40,7 +40,8 @@ hex = { workspace = true }
 chacha20poly1305 = "0.10"
 rand = "0.9"
 rand_chacha = "0.9"
-reqwest = { version = "0.11", features = ["json"] }
+# reqwest 0.12 (hyper 1.x) pulls patched h2 >=0.4.16 — RUSTSEC-2026-0258.
+reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 blake3 = { workspace = true }
 
