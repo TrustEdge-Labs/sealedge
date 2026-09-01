@@ -253,8 +253,20 @@ impl KeyManager {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory for {}", path.display()))?;
         }
+        // Unique temp sibling per writer. A fixed ".tmp" name let two concurrent
+        // writers to the same target share one temp file: the first's rename moved
+        // it into place, and the second's rename then failed with "No such file"
+        // ("Failed to finalize signing key ..."). This surfaced as a flaky CI
+        // failure when parallel tests generated the same default key path; it is
+        // also a real hazard for any two processes sharing a JWKS_KEY_PATH.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
         let mut tmp_os = path.as_os_str().to_owned();
-        tmp_os.push(".tmp");
+        tmp_os.push(format!(
+            ".tmp.{}.{}",
+            std::process::id(),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let tmp = std::path::PathBuf::from(tmp_os);
 
         {
