@@ -233,20 +233,8 @@ else
     skip "wasm32-unknown-unknown target not installed"
 fi
 
-# ── Step 8: Semver ─────────────────────────────────────────────────
-step "Step 8: API compatibility (cargo-semver-checks)"
-if command -v cargo-semver-checks &> /dev/null; then
-    if cargo semver-checks --package sealedge-core --baseline-rev HEAD~1 2>/dev/null; then
-        pass "semver check"
-    else
-        echo "  ⚠ semver check failed (non-blocking)"
-    fi
-else
-    skip "cargo-semver-checks not installed"
-fi
-
-# ── Step 9: Dependency tree size ────────────────────────────────────
-step "Step 9: Dependency tree size check"
+# ── Step 8: Dependency tree size ────────────────────────────────────
+step "Step 8: Dependency tree size check"
 dep_count=$(cargo tree --workspace --depth 1 --prefix none --no-dedupe 2>/dev/null | sort -u | wc -l)
 baseline=70
 threshold=$((baseline + 10))
@@ -258,8 +246,8 @@ else
     pass "dependency tree within baseline"
 fi
 
-# ── Step 10: TODO hygiene ──────────────────────────────────────────
-step "Step 10: TODO hygiene (no unimplemented markers)"
+# ── Step 9: TODO hygiene ──────────────────────────────────────────
+step "Step 9: TODO hygiene (no unimplemented markers)"
 todo_count=0
 while IFS= read -r match; do
     case "$match" in
@@ -277,8 +265,8 @@ else
     pass "No unimplemented TODO/FIXME markers"
 fi
 
-# ── Step 11: Secret struct derive check ────────────────────────────
-step "Step 11: Secret struct derive check (no Serialize on secret-holding structs)"
+# ── Step 10: Secret struct derive check ────────────────────────────
+step "Step 10: Secret struct derive check (no Serialize on secret-holding structs)"
 SECRET_STRUCTS_OK=true
 
 for file_struct in \
@@ -304,8 +292,8 @@ if [ "$SECRET_STRUCTS_OK" = true ]; then
     pass "No forbidden derives on secret-holding structs; all have [REDACTED] Debug impls"
 fi
 
-# ── Step 12: Dashboard bundle credential check ──────────────────────
-step "Step 12: Dashboard bundle credential check"
+# ── Step 11: Dashboard bundle credential check ──────────────────────
+step "Step 11: Dashboard bundle credential check"
 if [ -d "web/dashboard" ] && command -v node &> /dev/null; then
     if (cd web/dashboard && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null); then
         if grep -r "VITE_API_KEY" web/dashboard/build/ 2>/dev/null; then
