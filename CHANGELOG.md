@@ -16,6 +16,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — key-bundle zeroization & recovery integrity
+
+- **Key-bundle zeroization close-out.** The device-key import/export path no
+  longer leaves secret material in unzeroed heap copies. `DeviceBundle`'s
+  plaintext form is now a dedicated `ZeroizeOnDrop` struct (replacing a
+  `serde_json::Value` whose owned secret strings lingered); `to_plaintext`
+  returns a `Zeroizing<String>`; `import_encrypted` wraps the decrypted buffer
+  and validates UTF-8 by borrow (no owned copy). The single-key path
+  (`DeviceKeypair::import_secret_encrypted`) wraps its decrypted raw key in
+  `Zeroizing` too, and every CLI passphrase prompt is zeroized on drop.
+- **Atomic `unwrap`.** `seal unwrap` recovers to a temp file and atomically
+  renames it into place only on success; a mid-stream failure (I/O error, disk
+  full, AEAD failure) now deletes the partial instead of leaving a
+  silently-truncated plaintext that looked like a complete recovery. A failed
+  unwrap also no longer truncates an existing output file — the previous output
+  is untouched until the new recovery completes. Restores the pre-streaming
+  all-or-nothing guarantee while keeping constant memory.
+- **Key-file version validation.** `DeviceBundle::from_plaintext` and
+  `open_secret` now reject an unexpected format version (bundle `!= 2`, sealed
+  secret `!= 1`) before parsing the payload — closing a structural gap where a
+  version mismatch was silently ignored.
+- **Dependency.** Bumped `chacha20` 0.10.1 → 0.10.2 (0.10.1 was yanked upstream;
+  pulled transitively via the QUIC stack).
+
 ### Changed — H3: streaming I/O (constant-memory wrap + bounded reads)
 
 - **Streaming wrap.** `wrap` no longer holds the payload in memory: a new core

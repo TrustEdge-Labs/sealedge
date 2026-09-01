@@ -131,6 +131,16 @@ pub fn open_secret(data: &[u8], passphrase: &str) -> Result<Zeroizing<Vec<u8>>, 
     let meta: serde_json::Value = serde_json::from_str(meta_str)
         .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid JSON metadata: {e}")))?;
 
+    // F3: reject an unexpected sealed-secret version before touching the payload.
+    match meta["version"].as_u64() {
+        Some(1) => {}
+        other => {
+            return Err(CryptoError::InvalidKeyFormat(format!(
+                "Unsupported sealed-secret version {other:?} (expected 1)"
+            )))
+        }
+    }
+
     let salt = BASE64
         .decode(meta["salt"].as_str().unwrap_or_default())
         .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid salt base64: {e}")))?;
@@ -464,6 +474,13 @@ impl DeviceBundle {
         // when `secrets` drops at the end of this function.
         let secrets: BundleSecrets = serde_json::from_str(s)
             .map_err(|e| CryptoError::InvalidKeyFormat(format!("Invalid bundle JSON: {e}")))?;
+        // F3: reject an unexpected bundle version (structural guard).
+        if secrets.version != 2 {
+            return Err(CryptoError::InvalidKeyFormat(format!(
+                "Unsupported bundle version {} (expected 2)",
+                secrets.version
+            )));
+        }
         Ok(Self {
             signing: DeviceKeypair::import_secret(&secrets.ed25519_secret)?,
             key_agreement: KeyAgreementKeypair::import_secret(&secrets.x25519_secret)?,
@@ -762,6 +779,42 @@ mod tests {
         let bundle = DeviceBundle::generate().unwrap();
         let bundle_blob = bundle.export_encrypted("pw").unwrap();
         assert!(open_secret(&bundle_blob, "pw").is_err());
+    }
+
+    #[test]
+    fn test_open_secret_rejects_wrong_version() {
+        // F3: flip the sealed-secret "version":1 -> 2 in the meta line; the reader
+        // must reject before touching the payload. Same byte-surgery as the
+        // iterations test, keeping the header + ciphertext.
+        let blob = seal_secret(&[7u8; 32], "pw").unwrap();
+        let text = String::from_utf8_lossy(&blob);
+        let mut lines = text.splitn(3, '\n');
+        let header = lines.next().unwrap();
+        let meta = lines.next().unwrap();
+        let hacked_meta = meta.replace("\"version\":1", "\"version\":2");
+        assert_ne!(hacked_meta, meta, "meta must contain the version field");
+        let ct_start = header.len() + 1 + meta.len() + 1;
+        let mut hacked = Vec::new();
+        hacked.extend_from_slice(header.as_bytes());
+        hacked.push(b'\n');
+        hacked.extend_from_slice(hacked_meta.as_bytes());
+        hacked.push(b'\n');
+        hacked.extend_from_slice(&blob[ct_start..]);
+        assert!(matches!(
+            open_secret(&hacked, "pw"),
+            Err(CryptoError::InvalidKeyFormat(_))
+        ));
+    }
+
+    #[test]
+    fn test_from_plaintext_rejects_wrong_version() {
+        // F3: a bundle claiming a version other than 2 is rejected structurally,
+        // before any secret material is parsed (dummy secrets never reached).
+        let bad = r#"{"version":3,"ed25519_secret":"x","x25519_secret":"y"}"#;
+        assert!(matches!(
+            DeviceBundle::from_plaintext(bad),
+            Err(CryptoError::InvalidKeyFormat(_))
+        ));
     }
 
     #[test]
