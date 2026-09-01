@@ -7,17 +7,24 @@
 # Run before pushing to catch issues without burning GH Actions minutes.
 #
 # Usage:
-#   ./scripts/ci-check.sh          # Fast incremental (default)
+#   ./scripts/ci-check.sh          # Full suite, incremental (default)
 #   ./scripts/ci-check.sh --clean  # Full clean build (matches CI exactly)
+#   ./scripts/ci-check.sh --fast   # Static lint checks only (copyright, fmt,
+#                                  #   TODO, secret-derive) — no compile. This is
+#                                  #   what the pre-push hook runs.
 
 set -e
 
 cd "$(dirname "$0")/.."
 
 CLEAN=false
-if [ "$1" = "--clean" ]; then
-    CLEAN=true
-fi
+FAST=false
+for arg in "$@"; do
+    case "$arg" in
+        --clean) CLEAN=true ;;
+        --fast) FAST=true ;;
+    esac
+done
 
 PASS=0
 FAIL=0
@@ -82,6 +89,7 @@ else
 fi
 
 # ── Step 2: Security audit ──────────────────────────────────────────
+if ! $FAST; then
 step "Step 2: Security audit (cargo-audit)"
 # --deny warnings: any advisory (vulnerability OR informational warning) fails the
 # build unless it is explicitly accepted in .cargo/audit.toml with a justification.
@@ -94,6 +102,7 @@ if command -v cargo-audit &> /dev/null; then
 else
     skip "cargo-audit not installed (install: cargo install cargo-audit)"
 fi
+fi # end !FAST (audit)
 
 # ── Step 3: Format ──────────────────────────────────────────────────
 step "Step 3: Format check"
@@ -104,6 +113,7 @@ else
 fi
 
 # ── Step 4: Clippy (all features) ──────────────────────────────────
+if ! $FAST; then
 step "Step 4: Clippy"
 
 HAS_ALSA=false
@@ -245,6 +255,7 @@ if [ "$dep_count" -gt "$threshold" ]; then
 else
     pass "dependency tree within baseline"
 fi
+fi # end !FAST (clippy, cargo-hack, build/test, wasm, dep-tree)
 
 # ── Step 9: TODO hygiene ──────────────────────────────────────────
 step "Step 9: TODO hygiene (no unimplemented markers)"
@@ -293,6 +304,7 @@ if [ "$SECRET_STRUCTS_OK" = true ]; then
 fi
 
 # ── Step 11: Dashboard bundle credential check ──────────────────────
+if ! $FAST; then
 step "Step 11: Dashboard bundle credential check"
 if [ -d "web/dashboard" ] && command -v node &> /dev/null; then
     if (cd web/dashboard && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null); then
@@ -307,6 +319,7 @@ if [ -d "web/dashboard" ] && command -v node &> /dev/null; then
 else
     skip "node not available or web/dashboard not present — skipping bundle check"
 fi
+fi # end !FAST (dashboard bundle)
 
 # ── Summary ─────────────────────────────────────────────────────────
 echo

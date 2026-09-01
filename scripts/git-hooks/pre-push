@@ -1,0 +1,14 @@
+#!/bin/bash
+# Copyright (c) 2025 TRUSTEDGE LABS LLC
+# MPL-2.0: https://mozilla.org/MPL/2.0/
+# Project: trustedge — Privacy and trust at the edge.
+#
+# Pre-push gate: the fast static lint checks (copyright, fmt, TODO, secret-derive)
+# — the same checks as CI's `lint` job, which is what tends to slip past ad-hoc
+# `cargo` commands. Runs in seconds, no compile.
+#
+# Full local CI parity (clippy, build, tests, wasm, audit):  ./scripts/ci-check.sh
+# Bypass this gate for a specific push:                      git push --no-verify
+#
+# Activated by:  git config core.hooksPath scripts/git-hooks   (re-run after a fresh clone)
+exec ./scripts/ci-check.sh --fast
