@@ -1,5 +1,9 @@
 # te-prove: Trust Policy Engine for FOSS Supply Chain Integrity
 
+> **Status: PARKED (idea/design only — not on the roadmap).** Preserved here when
+> the legacy `.planning/` planning tree was removed; parked pending demand
+> evidence. Nothing in this document is implemented.
+
 ## Purpose
 
 te-prove is a standalone trust policy engine under the TrustEdge ecosystem. It protects solo developers and small FOSS teams from supply chain attacks — like the Drift Protocol $286M hack[cite:33] and the xz-utils backdoor[cite:50] — by enforcing cryptographically-verifiable trust policies at the code boundary, without restricting open social collaboration.

@@ -55,3 +55,6 @@ deploy/.env
 examples/cam.video/device.key
 examples/cam.video/device.pub
 examples/cam.video/clip.seal/
+
+# Legacy get-shit-done planning artifacts (removed; recover from git history)
+.planning/

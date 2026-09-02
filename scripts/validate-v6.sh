@@ -219,10 +219,12 @@ fi
 
 # ── D-02 test-count floor enforcement (≥ 471) ─────────────────────────
 # Parse validate-v6.log for `test result: ok. N passed` lines and sum N.
-# See .planning/phases/89-final-validation/89-CONTEXT.md §D-02
+# Floor rationale (D-02): the v6.0 release validated at 471 green tests; a count
+# below that must be explicit (--allow-regression), guarding against silently
+# dropped tests.
 TOTAL_TESTS=$(grep -oE 'test result: ok\. [0-9]+ passed' validate-v6.log 2>/dev/null | awk '{s+=$4} END {print s+0}')
 echo "  Total green tests: $TOTAL_TESTS (floor: 471)"
-if [ "$TOTAL_TESTS" -lt 471 ]; then  # D-02 floor — see .planning/phases/89-final-validation/89-CONTEXT.md §D-02
+if [ "$TOTAL_TESTS" -lt 471 ]; then  # D-02 floor (v6.0 validation baseline)
     if $ALLOW_REGRESSION; then
         echo "  ⚠ Test count below v6.0 floor (471), but --allow-regression set."
         echo "  D-02 JUSTIFICATION: $REGRESSION_JUSTIFICATION"
