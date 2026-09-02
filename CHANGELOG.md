@@ -638,7 +638,11 @@ All functionality remains available through `trustedge-core` with identical APIs
 
 ---
 
-[Unreleased]: https://github.com/TrustEdge-Labs/sealedge/compare/v3.0...HEAD
+[Unreleased]: https://github.com/TrustEdge-Labs/sealedge/compare/v6.2.0...HEAD
+[6.2.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v6.1.0...v6.2.0
+[6.1.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v6.0.0...v6.1.0
+[6.0.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v4.0...v6.0.0
+[4.0.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v3.0...v4.0
 [3.0.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.9...v3.0
 [2.9.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.8...v2.9
 [2.8.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.7...v2.8
