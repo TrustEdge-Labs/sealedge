@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [6.2.0] - 2026-09-02
+
 ### Security — key-bundle zeroization & recovery integrity
 
 - **Key-bundle zeroization close-out.** The device-key import/export path no
