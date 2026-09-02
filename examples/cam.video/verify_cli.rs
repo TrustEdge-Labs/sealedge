@@ -10,7 +10,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 
-use sealedge_core::{read_archive, validate_archive, verify_manifest, ProfileMetadata};
+use sealedge_core::{read_manifest, validate_archive, verify_manifest, ProfileMetadata};
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Sealedge cam.video Example: Verify CLI");
@@ -54,8 +54,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Device public key: {}", device_pub_key);
     println!();
 
-    // Read and validate archive
-    let (manifest, _chunks) = read_archive(&archive_path)
+    // Read the manifest (bounded; no chunk load) — validate_archive below does the
+    // streamed integrity check.
+    let (manifest, _sig) = read_manifest(&archive_path)
         .map_err(|e| format!("Failed to read archive '{}': {}", archive_path, e))?;
 
     // Version dispatch (C4): reject legacy/unknown formats before the signature

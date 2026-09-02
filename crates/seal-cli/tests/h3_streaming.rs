@@ -275,3 +275,60 @@ fn empty_input_is_rejected_without_creating_archive() {
         "no archive dir should be created on empty input"
     );
 }
+
+#[test]
+fn emit_request_rejects_mismatched_chunk_file() {
+    // F5: emit-request recomputes segment hashes from positional NNNNN.bin; it must
+    // refuse a manifest whose segment names a different chunk file (integrity parity
+    // with verify/read_archive), rather than hashing a file the manifest doesn't name.
+    let dir = TempDir::new().unwrap();
+    let _ed = keygen(dir.path(), "device");
+    let key = dir.path().join("device.key");
+    let pubp = dir.path().join("device.pub");
+
+    let input = dir.path().join("in.bin");
+    fs::write(&input, payload(1000)).unwrap(); // single chunk -> 00000.bin
+    let archive = dir.path().join("a.seal");
+    seal()
+        .args([
+            "wrap",
+            "--unencrypted",
+            "--in",
+            input.to_str().unwrap(),
+            "--out",
+            archive.to_str().unwrap(),
+            "--device-key",
+            key.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Point segment 0 at a different chunk file in the manifest (chunk_file only
+    // appears as this value; the detached signature is untouched, so read_manifest
+    // still parses — F5 is what must catch it).
+    let manifest_path = archive.join("manifest.json");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    assert!(
+        manifest.contains("00000.bin"),
+        "manifest must name the chunk file"
+    );
+    fs::write(&manifest_path, manifest.replace("00000.bin", "0000x.bin")).unwrap();
+
+    let out = dir.path().join("req.json");
+    seal()
+        .args([
+            "emit-request",
+            "--archive",
+            archive.to_str().unwrap(),
+            "--device-pub",
+            pubp.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !out.exists(),
+        "no request should be written when a segment mismatches"
+    );
+}

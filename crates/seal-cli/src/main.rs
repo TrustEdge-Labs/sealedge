@@ -1610,7 +1610,9 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
                         stored.len()
                     );
                 }
-                let nonce: [u8; 24] = stored[..24].try_into().unwrap();
+                let nonce: [u8; 24] = stored[..24]
+                    .try_into()
+                    .with_context(|| format!("Chunk {index:05}: malformed 24-byte nonce prefix"))?;
                 let ciphertext = &stored[24..];
                 let key = chacha20poly1305::Key::from_slice(cek.as_bytes());
                 let plaintext =

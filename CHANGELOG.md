@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dependency.** Bumped `chacha20` 0.10.1 → 0.10.2 (0.10.1 was yanked upstream;
   pulled transitively via the QUIC stack).
 
+### Deprecated
+
+- `read_archive` (the load-all archive reader) is deprecated — it loads every chunk
+  into memory. Use `validate_archive` (streamed integrity check), `read_manifest`
+  (manifest only), or per-chunk streaming on verify/ingest/large-payload paths.
+  It remains a compat re-export; removal is slated for the next release cycle.
+
 ### Security — archive read-path hardening
 
 - **Chunk size cap + integrity.** Every chunk read path (`validate_archive`,

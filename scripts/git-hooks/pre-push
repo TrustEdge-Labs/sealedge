@@ -1,7 +1,7 @@
 #!/bin/bash
 # Copyright (c) 2025 TRUSTEDGE LABS LLC
 # MPL-2.0: https://mozilla.org/MPL/2.0/
-# Project: trustedge — Privacy and trust at the edge.
+# Project: sealedge — Privacy and trust at the edge.
 #
 # Pre-push gate: the fast static lint checks (copyright, fmt, TODO, secret-derive)
 # — the same checks as CI's `lint` job, which is what tends to slip past ad-hoc

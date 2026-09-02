@@ -117,10 +117,12 @@ pub mod protocols;
 pub mod secure_file;
 
 pub use archive::{
-    archive_dir_name, read_archive, read_manifest, validate_archive, write_archive, ArchiveError,
-    ArchiveWriter, ChunkOutcome, MANIFEST_MAX_BYTES, MAX_CHUNK_SIZE_BYTES, MAX_STORED_CHUNK_BYTES,
-    SIG_MAX_BYTES,
+    archive_dir_name, read_manifest, validate_archive, write_archive, ArchiveError, ArchiveWriter,
+    ChunkOutcome, MANIFEST_MAX_BYTES, MAX_CHUNK_SIZE_BYTES, MAX_STORED_CHUNK_BYTES, SIG_MAX_BYTES,
 };
+// Retained compat re-export; read_archive is deprecated (loads all chunks — N3/H3).
+#[allow(deprecated)]
+pub use archive::read_archive;
 pub use asymmetric::{
     decrypt_key_asymmetric, encrypt_key_asymmetric, key_exchange, AsymmetricError, KeyPair,
     PrivateKey, PublicKey,

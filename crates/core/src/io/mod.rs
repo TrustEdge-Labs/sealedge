@@ -42,15 +42,15 @@
 //!   - Integration with cpal for cross-platform audio (ALSA/CoreAudio/WASAPI)
 //!
 //! - `archive.rs` (from `crates/core/src/archive.rs`)
-//!   - `read_archive()` - read .trst archive from disk
-//!   - `write_archive()` - write envelope data to .trst format
-//!   - `validate_archive()` - verify archive structure and signatures
+//!   - `read_manifest()` - read the manifest + signature only (no chunk load)
+//!   - `validate_archive()` - verify structure, signatures, and continuity (streamed)
+//!   - `write_archive()` - write envelope data to .seal format
 //!   - `archive_dir_name()` - generate archive directory names
 //!
 //! ## Usage Example
 //!
 //! ```rust,ignore
-//! use sealedge_core::io::{AudioCapture, read_archive, write_archive};
+//! use sealedge_core::io::{validate_archive, write_archive, AudioCapture};
 //! use sealedge_core::protocols::Envelope;
 //!
 //! // Capture live audio
@@ -61,9 +61,9 @@
 //!     let chunk = capture.read_chunk()?;
 //! }
 //!
-//! // Read an archive
-//! let archive_path = "clip-12345.trst";
-//! let manifest = read_archive(archive_path)?;
+//! // Validate an archive (bounded, streamed — no whole-payload load)
+//! let archive_path = "clip-12345.seal";
+//! validate_archive(archive_path)?;
 //!
 //! // Write an archive
 //! let envelope = Envelope::seal(data, &sender_key, &recipient_key)?;

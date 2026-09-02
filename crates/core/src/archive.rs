@@ -271,6 +271,10 @@ pub fn read_manifest<P: AsRef<Path>>(base_dir: P) -> Result<(TrstManifest, Vec<u
 /// N3: compat / small-caller API — it loads EVERY chunk into memory. Do NOT use
 /// it on verify/ingest or large-payload paths; use [`validate_archive`] (stream-
 /// hashes), [`read_manifest`] (manifest only), or a per-chunk stream instead.
+#[deprecated(
+    note = "loads every chunk into memory; use validate_archive, read_manifest, or a \
+            per-chunk stream on verify/ingest/large-payload paths (N3/H3)"
+)]
 pub fn read_archive<P: AsRef<Path>>(
     base_dir: P,
 ) -> Result<(TrstManifest, ChunkData), ArchiveError> {
@@ -478,6 +482,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercises the retained read_archive compat API
     fn test_write_and_read_archive_round_trip() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("test.seal");
@@ -591,6 +596,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercises the retained read_archive compat API
     fn test_signature_mismatch() {
         let temp_dir = TempDir::new().unwrap();
         let archive_path = temp_dir.path().join("test.seal");
@@ -635,6 +641,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercises the retained read_archive compat API
     fn test_archive_writer_streams_readable_archive() {
         // ArchiveWriter (streaming) must produce an archive read_archive/
         // validate_archive accept — identical bytes to write_archive for the same
