@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Zeroization sweep completion.** The YubiKey signing path no longer keeps a
+  plaintext copy of the PIN — `YubiKeySigningKeyPair` holds it as
+  `Zeroizing<String>` (the config already held it as `Secret<String>`). The seal
+  CLI reads a `--unencrypted` key file's bytes into a `Zeroizing<Vec<u8>>` and
+  validates UTF-8 by borrow (no owned lossy copy of the secret). Completes the
+  F1a key-material zeroization work.
+
 ## [6.2.0] - 2026-09-02
 
 ### Security — key-bundle zeroization & recovery integrity

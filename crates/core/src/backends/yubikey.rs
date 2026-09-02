@@ -47,6 +47,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use yubikey::piv::{AlgorithmId, SlotId};
 use yubikey::{Certificate, YubiKey};
+use zeroize::Zeroizing;
 
 /// Configuration for YubiKey PIV backend
 ///
@@ -451,7 +452,9 @@ impl YubiKeyBackend {
             yubikey: Arc::clone(&self.yubikey),
             slot,
             public_key: public_key_bytes.to_vec(),
-            pin: self.config.pin().map(|s| s.to_string()),
+            // Zeroizing: the PIN copy handed to the signing key pair is wiped on
+            // drop (the config already holds it as Secret<String>).
+            pin: self.config.pin().map(|s| Zeroizing::new(s.to_string())),
         };
 
         let key_pair = KeyPair::from_remote(Box::new(signing_key_pair)).map_err(|e| {
@@ -483,7 +486,7 @@ struct YubiKeySigningKeyPair {
     yubikey: Arc<Mutex<Option<YubiKey>>>,
     slot: SlotId,
     public_key: Vec<u8>,
-    pin: Option<String>,
+    pin: Option<Zeroizing<String>>,
 }
 
 impl RemoteKeyPair for YubiKeySigningKeyPair {

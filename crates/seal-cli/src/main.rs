@@ -631,8 +631,12 @@ fn handle_keygen(args: KeygenCmd) -> Result<()> {
 /// key is rejected with an actionable error — content encryption (C4) needs the
 /// X25519 key that only V2 bundles carry.
 fn load_bundle(path: &Path, unencrypted: bool) -> Result<DeviceBundle> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("failed to read device key '{}'", path.display()))?;
+    // Zeroizing: a plaintext (--unencrypted) key file's bytes are secret material;
+    // wipe them on drop regardless of which branch consumes them.
+    let bytes = Zeroizing::new(
+        fs::read(path)
+            .with_context(|| format!("failed to read device key '{}'", path.display()))?,
+    );
 
     if bytes.starts_with(b"SEALEDGE-KEY-V2\n") {
         if unencrypted {
@@ -646,9 +650,12 @@ fn load_bundle(path: &Path, unencrypted: bool) -> Result<DeviceBundle> {
     }
 
     if unencrypted {
-        let contents = String::from_utf8_lossy(&bytes);
-        if let Ok(bundle) = DeviceBundle::from_plaintext(contents.trim()) {
-            return Ok(bundle);
+        // Borrow the plaintext as UTF-8 (no owned lossy copy of the secret); an
+        // invalid-UTF-8 file simply falls through to the format checks below.
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            if let Ok(bundle) = DeviceBundle::from_plaintext(s.trim()) {
+                return Ok(bundle);
+            }
         }
     }
 
@@ -666,8 +673,11 @@ fn load_bundle(path: &Path, unencrypted: bool) -> Result<DeviceBundle> {
 /// bundle (returning its signing key) and falls back to a legacy V1 key file.
 /// Used by operations that sign but do not encrypt (e.g. `attest-sbom`).
 fn load_signing_keypair(path: &Path, unencrypted: bool) -> Result<DeviceKeypair> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("failed to read device key '{}'", path.display()))?;
+    // Zeroizing: a plaintext (--unencrypted) key file's bytes are secret material.
+    let bytes = Zeroizing::new(
+        fs::read(path)
+            .with_context(|| format!("failed to read device key '{}'", path.display()))?,
+    );
 
     if bytes.starts_with(b"SEALEDGE-KEY-V2\n") {
         if unencrypted {
@@ -682,7 +692,10 @@ fn load_signing_keypair(path: &Path, unencrypted: bool) -> Result<DeviceKeypair>
     }
 
     if unencrypted {
-        let contents = String::from_utf8_lossy(&bytes);
+        // Borrow the plaintext as UTF-8 (no owned lossy copy of the secret); reject
+        // a non-UTF-8 key file rather than silently mangling it.
+        let contents = std::str::from_utf8(&bytes)
+            .map_err(|_| anyhow::anyhow!("unencrypted key file is not valid UTF-8"))?;
         if let Ok(bundle) = DeviceBundle::from_plaintext(contents.trim()) {
             return Ok(bundle.signing);
         }
