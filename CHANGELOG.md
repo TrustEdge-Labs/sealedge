@@ -234,6 +234,11 @@ Trademark-driven clean-break rename from **trustedge** to **sealedge**. The proj
 
 ## [5.0.0] - 2026-04-05
 
+> **Never released as a standalone version.** v5.0 ("Portfolio Polish") was paused
+> as partial — phases 79–80 (below) shipped, 81–82 were deferred — and its work was
+> released under **v6.0.0** (the Sealedge rebrand). There is no `v5.0` git tag, so
+> this heading has no version-diff link; `[6.0.0]` spans `v4.0...v6.0.0`.
+
 ### Portfolio Polish
 
 Hardened CI self-attestation and enhanced the published GitHub Action for marketplace readiness.
