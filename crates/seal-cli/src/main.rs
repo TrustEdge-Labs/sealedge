@@ -775,12 +775,13 @@ fn handle_wrap(args: WrapCmd) -> Result<()> {
     if args.unencrypted {
         warn_unencrypted();
     }
-    // Reject chunk sizes above 256 MB (268_435_456 bytes) to prevent memory exhaustion.
-    const MAX_CHUNK_SIZE: usize = 268_435_456;
-    if args.chunk_size > MAX_CHUNK_SIZE {
+    // Producer/consumer share one cap (sealedge_core::MAX_CHUNK_SIZE_BYTES): wrap
+    // refuses a larger --chunk-size and readers refuse a larger stored chunk (F10,
+    // SA1-style symmetry) — so a valid wrap can never produce an unreadable chunk.
+    if args.chunk_size > sealedge_core::MAX_CHUNK_SIZE_BYTES {
         anyhow::bail!(
             "--chunk-size must not exceed 256 MB ({} bytes), got {} bytes",
-            MAX_CHUNK_SIZE,
+            sealedge_core::MAX_CHUNK_SIZE_BYTES,
             args.chunk_size
         );
     }
@@ -1582,8 +1583,20 @@ fn handle_unwrap(args: UnwrapCmd) -> Result<()> {
 
     for index in 0..chunk_count {
         let chunk_path = chunks_dir.join(format!("{index:05}.bin"));
-        let stored = fs::read(&chunk_path)
-            .with_context(|| format!("Failed to read chunk: {}", chunk_path.display()))?;
+        // Bounded read (F10): read one byte past the stored-chunk cap and reject a
+        // larger file, so a hostile archive can't exhaust memory recovering here.
+        let stored = {
+            let f = fs::File::open(&chunk_path)
+                .with_context(|| format!("Failed to read chunk: {}", chunk_path.display()))?;
+            let mut buf = Vec::new();
+            f.take(sealedge_core::MAX_STORED_CHUNK_BYTES as u64 + 1)
+                .read_to_end(&mut buf)
+                .with_context(|| format!("Failed to read chunk: {}", chunk_path.display()))?;
+            if buf.len() > sealedge_core::MAX_STORED_CHUNK_BYTES {
+                anyhow::bail!("Chunk {index:05} exceeds the maximum stored size");
+            }
+            buf
+        };
 
         match &decrypt_ctx {
             None => {
@@ -2505,17 +2518,33 @@ async fn handle_emit_request(args: EmitRequestCmd) -> Result<()> {
     let chunks_dir = args.archive.join("chunks");
     let mut segments = Vec::with_capacity(manifest.segments.len());
     for index in 0..manifest.segments.len() {
-        let chunk_path = chunks_dir.join(format!("{index:05}.bin"));
+        let chunk_filename = format!("{index:05}.bin");
+        // F5: the manifest segment must name this positional chunk file — the same
+        // check read_archive/validate_archive enforce. Don't hash a file the
+        // manifest doesn't reference.
+        if manifest.segments[index].chunk_file != chunk_filename {
+            anyhow::bail!(
+                "Segment {index} references '{}', expected '{chunk_filename}'",
+                manifest.segments[index].chunk_file
+            );
+        }
+        let chunk_path = chunks_dir.join(&chunk_filename);
         let mut reader = BufReader::new(
             fs::File::open(&chunk_path)
                 .with_context(|| format!("Failed to read chunk: {}", chunk_path.display()))?,
         );
         let mut hasher = Hasher::new();
         let mut buf = [0u8; 64 * 1024];
+        let mut total: usize = 0;
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
+            }
+            // F10: reject an oversized chunk file (SA1 producer/consumer symmetry).
+            total = total.saturating_add(n);
+            if total > sealedge_core::MAX_STORED_CHUNK_BYTES {
+                anyhow::bail!("Chunk {chunk_filename} exceeds the maximum stored size");
             }
             hasher.update(&buf[..n]);
         }

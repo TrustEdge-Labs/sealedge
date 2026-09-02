@@ -50,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dependency.** Bumped `chacha20` 0.10.1 → 0.10.2 (0.10.1 was yanked upstream;
   pulled transitively via the QUIC stack).
 
+### Security — archive read-path hardening
+
+- **Chunk size cap + integrity.** Every chunk read path (`validate_archive`,
+  `read_archive`, `unwrap`, `emit-request`) now rejects a stored chunk larger than
+  `MAX_STORED_CHUNK_BYTES` — the 256 MiB `--chunk-size` producer cap plus AEAD
+  overhead — sharing one core const with the `wrap` guard so producer and consumer
+  can't drift (F10). `emit-request` also checks each segment's declared
+  `chunk_file` name before hashing (F5), matching `validate_archive`/`read_archive`.
+- **No exists()/open() TOCTOU.** `validate_archive` and `read_archive` open chunk
+  files directly and map a missing file to `MissingChunk`, instead of an
+  `exists()` precheck that could race with the open (F11).
+
 ### Changed — H3: streaming I/O (constant-memory wrap + bounded reads)
 
 - **Streaming wrap.** `wrap` no longer holds the payload in memory: a new core

@@ -404,11 +404,13 @@ attestation of an oversized binary/SBOM.
   `SIG_MAX_BYTES` (4 KiB), bounding the parse-DoS surface. The **same**
   `MANIFEST_MAX_BYTES` guards `ArchiveWriter::finalize`, so `wrap` never emits an
   archive a compliant reader would reject (producer/consumer can't drift).
+- **Chunk-size cap**: `wrap` refuses a `--chunk-size` over `MAX_CHUNK_SIZE_BYTES`
+  (256 MiB) and every read path (`validate_archive`, `unwrap`, `emit-request`,
+  `read_archive`) rejects a stored chunk larger than `MAX_STORED_CHUNK_BYTES`
+  (that cap + AEAD overhead) — one shared const, so a hostile archive cannot drive
+  an unbounded per-chunk allocation even at read time.
 
 **Residual risk**:
-- A single chunk is read whole during `unwrap`, so `chunk_size` bounds per-chunk
-  memory — a pathologically large `chunk_size` at wrap time trades memory for
-  fewer segments (operator-chosen, ceilinged by `MAX_CHUNK_SIZE`).
 - The platform HTTP layer's own request-body limit is separate (T-DoS on the
   network layer, `RequestBodyLimitLayer`); H3 addresses the file/archive paths.
 

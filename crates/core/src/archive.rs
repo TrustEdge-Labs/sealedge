@@ -27,6 +27,16 @@ pub const MANIFEST_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// is a generous defense-in-depth bound.
 pub const SIG_MAX_BYTES: usize = 4 * 1024;
 
+/// Producer cap on plaintext chunk size (256 MiB). `seal wrap` refuses a larger
+/// `--chunk-size`; the reader caps the *stored* chunk symmetrically (see
+/// [`MAX_STORED_CHUNK_BYTES`]) so producer and consumer can't drift (SA1-style, T16).
+pub const MAX_CHUNK_SIZE_BYTES: usize = 256 * 1024 * 1024;
+/// Reader cap on a stored chunk file: the plaintext cap plus one
+/// XChaCha20-Poly1305 nonce (24 bytes) and AEAD tag (16 bytes). A chunk file larger
+/// than this is rejected, so a hostile archive can't exhaust memory on the
+/// unwrap/verify paths (closes the T16 residual on per-chunk reads).
+pub const MAX_STORED_CHUNK_BYTES: usize = MAX_CHUNK_SIZE_BYTES + 24 + 16;
+
 /// Outcome of streaming one chunk through [`ArchiveWriter::push_chunk`].
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkOutcome {
@@ -196,15 +206,34 @@ fn read_capped(path: &Path, max: usize) -> Result<Vec<u8>, ArchiveError> {
 /// BLAKE3-hash a chunk file by streaming it through a fixed 64 KiB buffer (H3) —
 /// bounded RAM regardless of chunk size. Matches [`crate::chain::segment_hash`]
 /// (plain BLAKE3 of the file bytes).
-fn stream_hash_chunk(path: &Path) -> Result<[u8; 32], ArchiveError> {
-    let f = File::open(path)?;
+/// Open a chunk file, mapping a missing file to [`ArchiveError::MissingChunk`].
+/// Opening directly (rather than `exists()` then `open()`) closes a TOCTOU where
+/// the file could vanish between the check and the open (F11).
+fn open_chunk(path: &Path, filename: &str) -> Result<File, ArchiveError> {
+    File::open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ArchiveError::MissingChunk(filename.to_string()),
+        _ => ArchiveError::from(e),
+    })
+}
+
+fn stream_hash_chunk(path: &Path, filename: &str) -> Result<[u8; 32], ArchiveError> {
+    let f = open_chunk(path, filename)?;
     let mut reader = std::io::BufReader::new(f);
     let mut hasher = blake3::Hasher::new();
     let mut buf = [0u8; 64 * 1024];
+    let mut total: usize = 0;
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
+        }
+        // F10: reject a chunk file larger than any wrap could have produced, so a
+        // hostile archive can't drive unbounded work on the verify path.
+        total = total.saturating_add(n);
+        if total > MAX_STORED_CHUNK_BYTES {
+            return Err(ArchiveError::SchemaMismatch(format!(
+                "chunk {filename} exceeds the {MAX_STORED_CHUNK_BYTES}-byte cap"
+            )));
         }
         hasher.update(&buf[..n]);
     }
@@ -258,12 +287,8 @@ pub fn read_archive<P: AsRef<Path>>(
         let chunk_filename = format!("{:05}.bin", expected_index);
         let chunk_path = chunks_dir.join(&chunk_filename);
 
-        // Check if chunk file exists
-        if !chunk_path.exists() {
-            return Err(ArchiveError::MissingChunk(chunk_filename));
-        }
-
-        // Validate that segment.chunk_file matches expected name
+        // Validate the declared name, then open directly (missing -> MissingChunk,
+        // no exists()/open() TOCTOU, F11).
         if segment.chunk_file != chunk_filename {
             return Err(ArchiveError::InvalidChunkIndex {
                 expected: expected_index,
@@ -271,10 +296,18 @@ pub fn read_archive<P: AsRef<Path>>(
             });
         }
 
-        // Read chunk data
-        let mut chunk_file = File::open(chunk_path)?;
+        // Read chunk data with a bounded read (stored-chunk cap, F10): read one
+        // byte past the cap and reject if the file is larger.
+        let chunk_file = open_chunk(&chunk_path, &chunk_filename)?;
         let mut chunk_bytes = Vec::new();
-        chunk_file.read_to_end(&mut chunk_bytes)?;
+        chunk_file
+            .take(MAX_STORED_CHUNK_BYTES as u64 + 1)
+            .read_to_end(&mut chunk_bytes)?;
+        if chunk_bytes.len() > MAX_STORED_CHUNK_BYTES {
+            return Err(ArchiveError::SchemaMismatch(format!(
+                "chunk {chunk_filename} exceeds the {MAX_STORED_CHUNK_BYTES}-byte cap"
+            )));
+        }
 
         chunk_data.push((expected_index, chunk_bytes));
     }
@@ -322,9 +355,8 @@ pub fn validate_archive<P: AsRef<Path>>(base_dir: P) -> Result<(), ArchiveError>
         let chunk_filename = format!("{:05}.bin", index);
         let chunk_path = chunks_dir.join(&chunk_filename);
 
-        if !chunk_path.exists() {
-            return Err(ArchiveError::MissingChunk(chunk_filename));
-        }
+        // Validate the declared name (no FS access), then open directly — a missing
+        // file maps to MissingChunk, avoiding an exists()/open() TOCTOU (F11).
         if segment.chunk_file != chunk_filename {
             return Err(ArchiveError::InvalidChunkIndex {
                 expected: index,
@@ -332,8 +364,8 @@ pub fn validate_archive<P: AsRef<Path>>(base_dir: P) -> Result<(), ArchiveError>
             });
         }
 
-        // Stream-hash the chunk (bounded RAM) and match the stored hash.
-        let computed_hash = stream_hash_chunk(&chunk_path)?;
+        // Stream-hash the chunk (bounded RAM, capped size) and match the stored hash.
+        let computed_hash = stream_hash_chunk(&chunk_path, &chunk_filename)?;
         let computed_hash_hex = hex::encode(computed_hash);
         if segment.blake3_hash != computed_hash_hex {
             return Err(ArchiveError::ValidationFailed(format!(
