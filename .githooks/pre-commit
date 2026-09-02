@@ -1,7 +1,7 @@
 #!/bin/bash
 # Copyright (c) 2025 TRUSTEDGE LABS LLC
 # MPL-2.0: https://mozilla.org/MPL/2.0/
-# Project: trustedge — Privacy and trust at the edge.
+# Project: sealedge — Privacy and trust at the edge.
 #
 # Pre-commit hook: fast checks only (copyright + fmt).
 # Full CI: ./scripts/ci-check.sh

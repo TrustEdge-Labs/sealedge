@@ -1,6 +1,6 @@
 # Copyright (c) 2025 TRUSTEDGE LABS LLC
 # MPL-2.0: https://mozilla.org/MPL/2.0/
-# Project: trustedge — Privacy and trust at the edge.
+# Project: sealedge — Privacy and trust at the edge.
 #
 # Pin the Rust toolchain so a newly-released `stable` can't turn a green tree red
 # with no code change (bit rot). This has bitten us repeatedly: rustix 0.37 (a
