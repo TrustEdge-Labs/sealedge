@@ -638,20 +638,20 @@ All functionality remains available through `trustedge-core` with identical APIs
 
 ---
 
-[Unreleased]: https://github.com/TrustEdge-Labs/trustedge/compare/v3.0...HEAD
-[3.0.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.9...v3.0
-[2.9.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.8...v2.9
-[2.8.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.7...v2.8
-[2.7.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.6...v2.7
-[2.6.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.5...v2.6
-[2.5.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.4...v2.5
-[2.4.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.3...v2.4
-[2.3.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.2...v2.3
-[2.2.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.1...v2.2
-[2.1.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v2.0...v2.1
-[2.0.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v1.0...v2.0
-[1.0.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v0.3.0...v1.0
-[0.3.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/TrustEdge-Labs/trustedge/compare/v0.1.7...v0.2.0
-[0.1.7]: https://github.com/TrustEdge-Labs/trustedge/compare/v0.1.0...v0.1.7
-[0.1.0]: https://github.com/TrustEdge-Labs/trustedge/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TrustEdge-Labs/sealedge/compare/v3.0...HEAD
+[3.0.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.9...v3.0
+[2.9.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.8...v2.9
+[2.8.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.7...v2.8
+[2.7.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.6...v2.7
+[2.6.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.5...v2.6
+[2.5.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.4...v2.5
+[2.4.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.3...v2.4
+[2.3.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.2...v2.3
+[2.2.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.1...v2.2
+[2.1.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v2.0...v2.1
+[2.0.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v1.0...v2.0
+[1.0.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v0.3.0...v1.0
+[0.3.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/TrustEdge-Labs/sealedge/compare/v0.1.7...v0.2.0
+[0.1.7]: https://github.com/TrustEdge-Labs/sealedge/compare/v0.1.0...v0.1.7
+[0.1.0]: https://github.com/TrustEdge-Labs/sealedge/releases/tag/v0.1.0
