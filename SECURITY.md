@@ -42,6 +42,13 @@ Sealedge implements privacy-preserving edge data encryption with the following s
 1. **Side Channel Attacks**: No specific mitigations implemented
 2. **Memory Safety**: Relies on Rust's memory safety guarantees
 3. **External Audit**: No third-party security audit completed yet
+4. **Receipts are not a ledger**: The `applications::receipts` module provides **no
+   double-spend resistance** by design — there is no ledger or settlement layer.
+   Chain verification (`verify_signature_chain`, `verify_receipt_chain_with_keys`)
+   proves signature validity and continuity/integrity of a *single* presented chain;
+   it does not detect that the same receipt was assigned to two different
+   beneficiaries. Do not mistake chain verification for settlement finality. The
+   module is unstable/pre-P0.
 
 ### Current Security Status (v6.0)
 

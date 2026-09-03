@@ -61,7 +61,8 @@ fn main() -> Result<()> {
 
     let context = KeyDerivationContext::new(vec![1; 16])
         .with_additional_data(b"demo_context".to_vec())
-        .with_iterations(600_000);
+        .with_iterations(600_000)
+        .expect("600k is a valid iteration count");
 
     let derive_op = CryptoOperation::DeriveKey { context };
 

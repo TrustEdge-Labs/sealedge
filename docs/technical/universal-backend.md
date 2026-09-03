@@ -172,7 +172,7 @@ use sealedge_core::{CryptoOperation, KeyDerivationContext};
 
 let context = KeyDerivationContext::new(vec![1; 16]) // 16-byte salt
     .with_additional_data(b"app_context".to_vec())
-    .with_iterations(600_000);
+    .with_iterations(600_000)?; // fallible: rejects out-of-range (min 300k, max 10M)
 
 let result = registry.perform_operation(
     "encryption_key",

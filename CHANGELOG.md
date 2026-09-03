@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CLI reads a `--unencrypted` key file's bytes into a `Zeroizing<Vec<u8>>` and
   validates UTF-8 by borrow (no owned lossy copy of the secret). Completes the
   F1a key-material zeroization work.
+- **PBKDF2 work-factor upper bound (DoS hardening).** The context-driven KDF path
+  (`UniversalKeyringBackend` derive) checked only a minimum iteration count, so a
+  caller-supplied `iterations` up to `u32::MAX` (~an hour of pinned CPU) passed —
+  an unbounded-work-factor DoS when the count comes from less-trusted input. Added
+  `PBKDF2_MAX_ITERATIONS` (10M) and a shared `validate_pbkdf2_iterations`, enforced
+  at the point of use (authoritative, since the context fields are `pub`/`Deserialize`).
+  `KeyDerivationContext::with_iterations` and `KeyContext::with_iterations` no longer
+  `assert!`-panic on out-of-range input (a caller-controlled process crash) — they
+  now return `Result` (**breaking**). SECURITY.md also now states the receipts module
+  has no double-spend resistance by design. (cyberscan #2)
 
 ### Added
 

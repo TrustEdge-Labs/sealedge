@@ -68,15 +68,12 @@ impl KeyContext {
         self
     }
 
-    pub fn with_iterations(mut self, iterations: u32) -> Self {
-        assert!(
-            iterations >= crate::backends::universal::PBKDF2_MIN_ITERATIONS,
-            "PBKDF2 iterations must be at least {} (got {}). See OWASP 2023 guidelines.",
-            crate::backends::universal::PBKDF2_MIN_ITERATIONS,
-            iterations,
-        );
+    /// Set the PBKDF2 iteration count, validating it against the accepted range.
+    /// Fallible (no panic); the point-of-use check during derivation is authoritative.
+    pub fn with_iterations(mut self, iterations: u32) -> Result<Self, BackendError> {
+        crate::backends::universal::validate_pbkdf2_iterations(iterations)?;
         self.iterations = Some(iterations);
-        self
+        Ok(self)
     }
 }
 

@@ -64,6 +64,13 @@ impl UniversalKeyringBackend {
             return Err(anyhow!("Salt must be exactly 32 bytes for keyring backend"));
         }
 
+        // Validate the PBKDF2 work factor (min AND max) before any keyring I/O. This
+        // is the authoritative point-of-use gate — `iterations` is caller-controlled
+        // via the pub, Deserialize-able KeyDerivationContext, so an upper bound here
+        // prevents an unbounded-work-factor DoS (e.g. u32::MAX ≈ an hour of CPU).
+        let iterations = context.iterations.unwrap_or(600_000);
+        crate::backends::universal::validate_pbkdf2_iterations(iterations)?;
+
         // Get passphrase from keyring
         let passphrase = self
             .get_passphrase()
@@ -72,16 +79,6 @@ impl UniversalKeyringBackend {
         // Convert salt to array
         let mut salt_array = [0u8; 32];
         salt_array.copy_from_slice(&context.salt);
-
-        // Use PBKDF2 with the specified hash algorithm (OWASP 2023 recommended iterations)
-        let iterations = context.iterations.unwrap_or(600_000);
-        if iterations < crate::backends::universal::PBKDF2_MIN_ITERATIONS {
-            return Err(anyhow!(
-                "PBKDF2 iterations {} is below minimum of {}",
-                iterations,
-                crate::backends::universal::PBKDF2_MIN_ITERATIONS,
-            ));
-        }
         let mut key = [0u8; 32];
 
         // Include key_id in the derivation for key isolation
@@ -315,7 +312,8 @@ mod tests {
         // but should show the operation structure works
         let context = KeyDerivationContext::new(vec![1; 32])
             .with_additional_data(vec![2, 3, 4])
-            .with_iterations(600_000);
+            .with_iterations(600_000)
+            .expect("600k is a valid iteration count");
 
         let result = backend.perform_operation("test_key", CryptoOperation::DeriveKey { context });
 
@@ -333,8 +331,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "PBKDF2 iterations must be at least 300000")]
-    fn test_pbkdf2_minimum_iterations_rejected() {
-        let _context = KeyDerivationContext::new(vec![1; 32]).with_iterations(1000);
+    fn test_pbkdf2_iterations_out_of_range_rejected() {
+        // Fallible builder — no panic on caller-controlled input. Below-min, zero,
+        // and above-max (incl. u32::MAX) are Err; the in-range endpoints are Ok.
+        let mk = |n: u32| KeyDerivationContext::new(vec![1; 32]).with_iterations(n);
+        assert!(mk(0).is_err());
+        assert!(mk(1000).is_err());
+        assert!(mk(299_999).is_err());
+        assert!(mk(u32::MAX).is_err());
+        assert!(mk(10_000_001).is_err());
+        assert!(mk(300_000).is_ok());
+        assert!(mk(10_000_000).is_ok());
     }
 }

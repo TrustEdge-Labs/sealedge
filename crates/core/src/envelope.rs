@@ -534,6 +534,30 @@ mod tests {
     }
 
     #[test]
+    fn test_beneficiary_tamper_changes_hash() {
+        // beneficiary_key_bytes is not covered by verify() today (cyberscan #1;
+        // public detection tracked in docs/designs/envelope-v3-authenticated-metadata.md),
+        // but it IS part of hash() — so rewriting it changes the envelope hash. This is
+        // what the keyed receipt verifier's prev_envelope_hash link relies on to catch a
+        // grafted/rewritten predecessor.
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let beneficiary = SigningKey::generate(&mut OsRng);
+        let attacker = SigningKey::generate(&mut OsRng);
+
+        let envelope =
+            Envelope::seal(b"payload", &signing_key, &beneficiary.verifying_key()).expect("seal");
+        let original_hash = envelope.hash().expect("hash");
+
+        let mut tampered = envelope.clone();
+        tampered.beneficiary_key_bytes = attacker.verifying_key().to_bytes();
+        assert_ne!(
+            original_hash,
+            tampered.hash().expect("hash"),
+            "rewriting beneficiary_key_bytes must change the envelope hash"
+        );
+    }
+
+    #[test]
     fn test_envelope_verification() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let beneficiary_key = SigningKey::generate(&mut OsRng);

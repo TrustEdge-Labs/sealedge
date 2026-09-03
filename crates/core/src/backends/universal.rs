@@ -18,6 +18,31 @@ use serde::{Deserialize, Serialize};
 /// Minimum allowed PBKDF2 iteration count (KDF-01 requirement)
 pub const PBKDF2_MIN_ITERATIONS: u32 = 300_000;
 
+/// Maximum allowed PBKDF2 iteration count. Above this, a single key derivation
+/// pins a CPU core for minutes (u32::MAX ≈ an hour) — an unbounded-work-factor DoS
+/// when the count comes from less-trusted input. ~17× the 600k default.
+pub const PBKDF2_MAX_ITERATIONS: u32 = 10_000_000;
+
+/// Validate a caller-supplied PBKDF2 iteration count against the accepted range.
+///
+/// This is the **authoritative** gate and MUST be called at the point of use (key
+/// derivation): `KeyDerivationContext`/`KeyContext` fields are `pub` and
+/// `Deserialize`, so a builder-side check alone is bypassable. The builders call it
+/// too, for early, fallible feedback (never a panic).
+pub fn validate_pbkdf2_iterations(iterations: u32) -> Result<(), BackendError> {
+    if iterations < PBKDF2_MIN_ITERATIONS {
+        return Err(BackendError::OperationFailed(format!(
+            "PBKDF2 iterations {iterations} is below the minimum of {PBKDF2_MIN_ITERATIONS}"
+        )));
+    }
+    if iterations > PBKDF2_MAX_ITERATIONS {
+        return Err(BackendError::OperationFailed(format!(
+            "PBKDF2 iterations {iterations} exceeds the maximum of {PBKDF2_MAX_ITERATIONS}"
+        )));
+    }
+    Ok(())
+}
+
 /// Cryptographic algorithms supported by backends
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymmetricAlgorithm {
@@ -76,15 +101,13 @@ impl KeyDerivationContext {
         self
     }
 
-    pub fn with_iterations(mut self, iterations: u32) -> Self {
-        assert!(
-            iterations >= PBKDF2_MIN_ITERATIONS,
-            "PBKDF2 iterations must be at least {} (got {}). See OWASP 2023 guidelines.",
-            PBKDF2_MIN_ITERATIONS,
-            iterations,
-        );
+    /// Set the PBKDF2 iteration count, validating it against the accepted range.
+    /// Fallible (no panic) so caller-controlled input can't crash the host; the
+    /// point-of-use check during derivation remains authoritative.
+    pub fn with_iterations(mut self, iterations: u32) -> Result<Self, BackendError> {
+        validate_pbkdf2_iterations(iterations)?;
         self.iterations = Some(iterations);
-        self
+        Ok(self)
     }
 
     pub fn with_hash_algorithm(mut self, algorithm: HashAlgorithm) -> Self {
@@ -302,6 +325,7 @@ mod tests {
         let context = KeyDerivationContext::new(vec![1, 2, 3, 4])
             .with_additional_data(vec![5, 6, 7, 8])
             .with_iterations(600_000)
+            .expect("600k is a valid iteration count")
             .with_hash_algorithm(HashAlgorithm::Sha512);
 
         assert_eq!(context.salt, vec![1, 2, 3, 4]);
@@ -311,9 +335,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "PBKDF2 iterations must be at least 300000")]
     fn test_key_derivation_context_rejects_low_iterations() {
-        let _context = KeyDerivationContext::new(vec![1, 2, 3, 4]).with_iterations(50_000);
+        // Fallible builder (no panic): below-min is Err, not a crash.
+        assert!(KeyDerivationContext::new(vec![1, 2, 3, 4])
+            .with_iterations(50_000)
+            .is_err());
+    }
+
+    #[test]
+    fn test_validate_pbkdf2_iterations_range() {
+        // The authoritative point-of-use gate: reject below-min, zero, and above-max
+        // (incl. u32::MAX); accept the in-range endpoints.
+        assert!(validate_pbkdf2_iterations(0).is_err());
+        assert!(validate_pbkdf2_iterations(PBKDF2_MIN_ITERATIONS - 1).is_err());
+        assert!(validate_pbkdf2_iterations(PBKDF2_MAX_ITERATIONS + 1).is_err());
+        assert!(validate_pbkdf2_iterations(u32::MAX).is_err());
+        assert!(validate_pbkdf2_iterations(PBKDF2_MIN_ITERATIONS).is_ok());
+        assert!(validate_pbkdf2_iterations(600_000).is_ok());
+        assert!(validate_pbkdf2_iterations(PBKDF2_MAX_ITERATIONS).is_ok());
     }
 
     #[test]
