@@ -362,12 +362,111 @@ pub fn verify_signature_chain(envelopes: &[Envelope]) -> bool {
             return false;
         }
 
-        // NOTE: Full chain verification (checking envelope hash references) requires
-        // decryption and is planned for post-P0. Current validation checks issuer/beneficiary
-        // chain continuity which provides ownership transfer guarantees.
+        // NOTE: Full chain verification (hash links, amounts, origin, beneficiary
+        // authenticity) requires decryption — see `verify_receipt_chain_with_keys`.
     }
 
     true
+}
+
+/// Fully verify a receipt chain using each envelope's beneficiary decryption key.
+///
+/// Unlike [`verify_signature_chain`] (signatures + a malleable continuity heuristic
+/// only), this unseals every envelope and checks the receipt-level invariants a
+/// public verifier cannot:
+/// - **Hash links** — receipt `i`'s `prev_envelope_hash` equals the actual
+///   [`Envelope::hash`] of envelope `i-1` (which covers the whole predecessor,
+///   including its beneficiary).
+/// - **Origin** — the first receipt has no predecessor (`prev_envelope_hash == None`).
+/// - **Ownership transfer** — receipt `i`'s issuer equals receipt `i-1`'s beneficiary.
+/// - **Amount continuity** — assignments preserve the amount.
+/// - **Party authenticity** — each receipt's declared `issuer`/`beneficiary` match
+///   the envelope's authenticated signer and its beneficiary field. This closes the
+///   malleable-`beneficiary_key_bytes` gap: rewriting it changes `Envelope::hash`
+///   (breaking the next link) and mismatches the in-payload `beneficiary` here.
+///
+/// `keys[i]` must be the beneficiary (recipient) signing key for `envelopes[i]`, and
+/// `keys.len()` must equal `envelopes.len()`. Returns `Ok(())` for a valid ownership
+/// chain, otherwise an error naming the first failing invariant. (No double-spend
+/// resistance — there is no ledger.)
+pub fn verify_receipt_chain_with_keys(envelopes: &[Envelope], keys: &[&SigningKey]) -> Result<()> {
+    if envelopes.is_empty() {
+        return Err(anyhow::anyhow!("empty receipt chain"));
+    }
+    if keys.len() != envelopes.len() {
+        return Err(anyhow::anyhow!(
+            "need one beneficiary key per envelope: {} keys for {} envelopes",
+            keys.len(),
+            envelopes.len()
+        ));
+    }
+
+    // Unseal every envelope with its beneficiary key. extract_receipt also verifies
+    // the envelope signature and runs receipt.validate() (e.g. amount != 0).
+    let receipts: Vec<OwnershipReceipt> = envelopes
+        .iter()
+        .zip(keys)
+        .enumerate()
+        .map(|(i, (env, key))| {
+            extract_receipt(env, key)
+                .with_context(|| format!("envelope {i}: unseal/extract failed"))
+        })
+        .collect::<Result<_>>()?;
+
+    // The chain must begin at a genuine origin.
+    if !receipts[0].is_origin() {
+        return Err(anyhow::anyhow!(
+            "envelope 0 is not an origin receipt (prev_envelope_hash must be None)"
+        ));
+    }
+
+    for i in 1..envelopes.len() {
+        let prev_hash = envelopes[i - 1]
+            .hash()
+            .with_context(|| format!("envelope {}: hash failed", i - 1))?;
+        if receipts[i].prev_envelope_hash != Some(prev_hash) {
+            return Err(anyhow::anyhow!(
+                "envelope {i}: prev_envelope_hash does not match envelope {}'s hash",
+                i - 1
+            ));
+        }
+        if receipts[i].issuer != receipts[i - 1].beneficiary {
+            return Err(anyhow::anyhow!(
+                "envelope {i}: issuer does not match previous beneficiary"
+            ));
+        }
+        if receipts[i].amount != receipts[i - 1].amount {
+            return Err(anyhow::anyhow!(
+                "envelope {i}: amount {} != previous amount {}",
+                receipts[i].amount,
+                receipts[i - 1].amount
+            ));
+        }
+    }
+
+    // Bind each receipt's declared parties to the envelope's authenticated signer
+    // and its beneficiary field (catches a rewritten beneficiary even on the final
+    // hop, which no successor hash protects).
+    for (i, (env, receipt)) in envelopes.iter().zip(&receipts).enumerate() {
+        let issuer = env
+            .issuer()
+            .with_context(|| format!("envelope {i}: invalid issuer key"))?;
+        if receipt.issuer != issuer.to_bytes() {
+            return Err(anyhow::anyhow!(
+                "envelope {i}: receipt issuer does not match the signing key"
+            ));
+        }
+        let beneficiary = env
+            .beneficiary()
+            .with_context(|| format!("envelope {i}: invalid beneficiary key"))?;
+        if receipt.beneficiary != beneficiary.to_bytes() {
+            return Err(anyhow::anyhow!(
+                "envelope {i}: receipt beneficiary does not match the envelope beneficiary"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -495,6 +594,82 @@ mod tests {
 
         // Test empty chain
         assert!(!verify_signature_chain(&[]));
+    }
+
+    #[test]
+    fn test_verify_receipt_chain_with_keys_valid() {
+        let alice = SigningKey::generate(&mut OsRng);
+        let bob = SigningKey::generate(&mut OsRng);
+        let charlie = SigningKey::generate(&mut OsRng);
+
+        // Alice -> Bob (origin) -> Charlie (assignment).
+        let e1 = create_receipt(&alice, &bob.verifying_key(), 1000, None).unwrap();
+        let e2 = assign_receipt(&e1, &bob, &charlie.verifying_key(), None).unwrap();
+
+        // keys[i] = beneficiary of envelope i: Bob unseals e1, Charlie unseals e2.
+        verify_receipt_chain_with_keys(&[e1, e2], &[&bob, &charlie])
+            .expect("valid keyed chain must verify");
+    }
+
+    #[test]
+    fn test_verify_receipt_chain_with_keys_rejects_wrong_predecessor() {
+        // The hash link must bind the exact predecessor envelope. Splice an
+        // assignment whose prev_envelope_hash points at envelope A onto a different
+        // origin B; the hash link must not match.
+        let alice = SigningKey::generate(&mut OsRng);
+        let bob = SigningKey::generate(&mut OsRng);
+        let charlie = SigningKey::generate(&mut OsRng);
+
+        let origin_a = create_receipt(&alice, &bob.verifying_key(), 1000, None).unwrap();
+        let origin_b = create_receipt(&alice, &bob.verifying_key(), 1000, None).unwrap();
+        let assign_from_a =
+            assign_receipt(&origin_a, &bob, &charlie.verifying_key(), None).unwrap();
+
+        // Signature-only continuity would pass (issuer/beneficiary still line up)…
+        assert!(verify_signature_chain(&[
+            origin_b.clone(),
+            assign_from_a.clone()
+        ]));
+        // …but the keyed hash-link check rejects the wrong predecessor.
+        let err = verify_receipt_chain_with_keys(&[origin_b, assign_from_a], &[&bob, &charlie])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("prev_envelope_hash"), "got: {err}");
+    }
+
+    #[test]
+    fn test_verify_receipt_chain_with_keys_rejects_non_origin_start() {
+        let alice = SigningKey::generate(&mut OsRng);
+        let bob = SigningKey::generate(&mut OsRng);
+        let charlie = SigningKey::generate(&mut OsRng);
+        let dave = SigningKey::generate(&mut OsRng);
+
+        let e1 = create_receipt(&alice, &bob.verifying_key(), 1000, None).unwrap();
+        let e2 = assign_receipt(&e1, &bob, &charlie.verifying_key(), None).unwrap();
+        let e3 = assign_receipt(&e2, &charlie, &dave.verifying_key(), None).unwrap();
+
+        // Start the chain at an assignment (e2) rather than the origin.
+        let err = verify_receipt_chain_with_keys(&[e2, e3], &[&charlie, &dave])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not an origin"), "got: {err}");
+    }
+
+    #[test]
+    fn test_verify_receipt_chain_with_keys_rejects_length_mismatch() {
+        let alice = SigningKey::generate(&mut OsRng);
+        let bob = SigningKey::generate(&mut OsRng);
+        let charlie = SigningKey::generate(&mut OsRng);
+        let e1 = create_receipt(&alice, &bob.verifying_key(), 1000, None).unwrap();
+        let e2 = assign_receipt(&e1, &bob, &charlie.verifying_key(), None).unwrap();
+
+        let err = verify_receipt_chain_with_keys(&[e1, e2], &[&bob])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("one beneficiary key per envelope"),
+            "got: {err}"
+        );
     }
 
     #[test]

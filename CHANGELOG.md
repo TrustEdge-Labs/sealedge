@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validates UTF-8 by borrow (no owned lossy copy of the secret). Completes the
   F1a key-material zeroization work.
 
+### Added
+
+- **`verify_receipt_chain_with_keys`.** Keyed full receipt-chain verification for
+  verifiers holding the beneficiary decryption keys: it unseals each envelope and
+  checks the invariants a public verifier cannot — hash links
+  (`prev_envelope_hash == prev.hash()`), a genuine origin, issuer→beneficiary
+  transfer, amount continuity, and that each receipt's declared parties match the
+  envelope. This closes the malleable-`beneficiary_key_bytes` gap for keyed
+  verifiers. Public verification of envelope-level metadata is a v2→v3 format change
+  tracked in `docs/designs/envelope-v3-authenticated-metadata.md`. (cyberscan #1, P1)
+
 ### Changed
 
 - **`verify_receipt_chain` → `verify_signature_chain` (breaking).** The name
