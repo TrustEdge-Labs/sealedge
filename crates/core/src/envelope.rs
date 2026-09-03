@@ -23,6 +23,16 @@ const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 /// Maximum chunk index that fits in the 3-byte nonce field (2^24 - 1).
 const MAX_CHUNK_INDEX: u64 = 16_777_215;
 
+/// The only envelope format version this binary understands.
+///
+/// `verify`/`unseal` reject any other value up front (fail-closed). This closes
+/// the silent-accept path where a deserialized envelope (e.g. from JSON) carries
+/// an unknown `version` and would otherwise be processed under v2 assumptions, and
+/// it is the forward-compatibility guard a future v3 relies on: a deployed v2-only
+/// binary refuses a v3 envelope rather than misinterpreting it. See
+/// `docs/designs/envelope-v3-authenticated-metadata.md`.
+const ENVELOPE_VERSION_V2: u8 = 2;
+
 /// A high-level envelope that wraps and secures arbitrary payloads
 ///
 /// This is the "steering wheel" - a simple interface that hides the complexity
@@ -183,7 +193,7 @@ impl Envelope {
         encryption_key.zeroize();
 
         Ok(Envelope {
-            version: 2,
+            version: ENVELOPE_VERSION_V2,
             hkdf_salt,
             chunks,
             verifying_key_bytes: signing_key.verifying_key().to_bytes(),
@@ -196,6 +206,13 @@ impl Envelope {
     ///
     /// This validates all signatures and ensures the envelope hasn't been tampered with.
     pub fn verify(&self) -> bool {
+        // Reject unknown versions up front (fail-closed): an envelope carrying any
+        // version this binary does not understand must not be validated under v2
+        // assumptions. Closes the deserialization silent-accept path.
+        if self.version != ENVELOPE_VERSION_V2 {
+            return false;
+        }
+
         // Verify each chunk's signature
         for chunk in &self.chunks {
             if !self.verify_chunk_signature(chunk) {
@@ -215,6 +232,17 @@ impl Envelope {
     ///
     /// Decrypts using v2 path: single HKDF key derivation + deterministic nonce reconstruction.
     pub fn unseal(&self, decryption_key: &SigningKey) -> Result<Vec<u8>> {
+        // Explicit, descriptive version guard before any key derivation so an
+        // unknown-version envelope fails with a clear reason rather than the
+        // generic verification error below (verify() also rejects it).
+        if self.version != ENVELOPE_VERSION_V2 {
+            return Err(anyhow::anyhow!(
+                "Unsupported envelope version {}: this build understands only v{}",
+                self.version,
+                ENVELOPE_VERSION_V2
+            ));
+        }
+
         if !self.verify() {
             return Err(anyhow::anyhow!("Envelope verification failed"));
         }
@@ -277,6 +305,15 @@ impl Envelope {
     pub fn issuer(&self) -> Result<VerifyingKey> {
         VerifyingKey::from_bytes(&self.verifying_key_bytes)
             .map_err(|e| anyhow::anyhow!("Invalid issuer key bytes: {e}"))
+    }
+
+    /// Test-only seam: overwrite the (unauthenticated) `beneficiary_key_bytes` to
+    /// simulate the malleable-beneficiary attack from another module's tests
+    /// (cyberscan #1). Not compiled into release builds; `beneficiary_key_bytes` is
+    /// deliberately not settable in production — `seal` is the only writer.
+    #[cfg(test)]
+    pub(crate) fn overwrite_beneficiary_for_test(&mut self, bytes: [u8; 32]) {
+        self.beneficiary_key_bytes = bytes;
     }
 
     // Private helper methods for the complex crypto operations
@@ -555,6 +592,35 @@ mod tests {
             tampered.hash().expect("hash"),
             "rewriting beneficiary_key_bytes must change the envelope hash"
         );
+    }
+
+    #[test]
+    fn test_unknown_version_is_rejected() {
+        // A deserialized envelope carrying an unknown version (e.g. a future v3, or
+        // a hand-crafted JSON blob) must fail closed: neither verify() nor unseal()
+        // may process it under v2 assumptions.
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let beneficiary = SigningKey::generate(&mut OsRng);
+
+        let envelope =
+            Envelope::seal(b"payload", &signing_key, &beneficiary.verifying_key()).expect("seal");
+        assert!(envelope.verify(), "freshly sealed v2 envelope must verify");
+
+        for bogus in [0u8, 1, 3, 255] {
+            let mut other = envelope.clone();
+            other.version = bogus;
+            assert!(
+                !other.verify(),
+                "verify() must reject version {bogus}, not just v2"
+            );
+            let err = other
+                .unseal(&beneficiary)
+                .expect_err("unseal must reject unknown version");
+            assert!(
+                err.to_string().contains("Unsupported envelope version"),
+                "unseal error should name the version problem, got: {err}"
+            );
+        }
     }
 
     #[test]

@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `KeyringBackend` derive (`keyring.rs`, now via the shared validator). All paths
   share the single canonical `PBKDF2_MAX_ITERATIONS` in `backends::universal`
   (`keywrap.rs` no longer defines its own copy). (cyberscan #2 follow-up)
+- **Reject unknown envelope versions (fail-closed).** `Envelope::verify` now returns
+  `false` and `Envelope::unseal` errors for any `version != 2`, instead of processing
+  a deserialized envelope under v2 assumptions regardless of its version tag. This
+  closes the serde_json silent-accept path (unknown fields are ignored by JSON) and
+  is the forward-compatibility gate a future v3 depends on — shipped ahead of v3 per
+  `docs/designs/envelope-v3-authenticated-metadata.md`.
 
 ### Added
 
