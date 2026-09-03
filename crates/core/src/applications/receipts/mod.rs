@@ -313,8 +313,8 @@ pub fn extract_receipt(
 /// - **Hash links.** The `prev_envelope_hash` in each receipt payload is never
 ///   compared against the predecessor's [`Envelope::hash`]. Doing so requires the
 ///   beneficiary's decryption key (payloads are encrypted per-recipient via ECDH),
-///   which a public verifier does not have — see `verify_receipt_chain_with_keys`
-///   (planned) for the keyed path.
+///   which a public verifier does not have — see [`verify_receipt_chain_with_keys`]
+///   for the keyed path.
 /// - **Amounts / receipt contents.** Encrypted per-beneficiary; not readable or
 ///   checkable here.
 /// - **Origin.** The first envelope is not verified to be a genuine genesis
@@ -668,6 +668,74 @@ mod tests {
             .to_string();
         assert!(
             err.contains("one beneficiary key per envelope"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_verify_receipt_chain_with_keys_rejects_amount_change() {
+        // Exercise the amount-continuity invariant directly with a hand-sealed
+        // assignment that is valid in every other respect — correct issuer (bob),
+        // correct beneficiary (charlie), correct hash link back to e1 — so ONLY the
+        // amount is wrong. This is the invariant assign_receipt can never violate on
+        // its own, so it needs a hand-built envelope to reach.
+        let alice = SigningKey::generate(&mut OsRng);
+        let bob = SigningKey::generate(&mut OsRng);
+        let charlie = SigningKey::generate(&mut OsRng);
+
+        let e1 = create_receipt(&alice, &bob.verifying_key(), 1000, None).unwrap();
+        let inflated = OwnershipReceipt::new_assignment(
+            &bob,
+            &charlie.verifying_key(),
+            5000, // != previous amount (1000)
+            e1.hash().unwrap(),
+            None,
+        );
+        let payload = serde_json::to_vec(&inflated).unwrap();
+        let e2 = Envelope::seal(&payload, &bob, &charlie.verifying_key()).unwrap();
+
+        // Public signature-only continuity is fooled (parties and signatures are
+        // genuine, and it can't read the encrypted amount)…
+        assert!(verify_signature_chain(&[e1.clone(), e2.clone()]));
+        // …but the keyed verifier decrypts and rejects the amount discontinuity.
+        let err = verify_receipt_chain_with_keys(&[e1, e2], &[&bob, &charlie])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("amount"), "got: {err}");
+    }
+
+    #[test]
+    fn test_verify_receipt_chain_with_keys_rejects_final_hop_beneficiary_rewrite() {
+        // The malleable-beneficiary attack (cyberscan #1) on the LAST hop: no
+        // successor envelope's hash link protects the final envelope, so only the
+        // party-authenticity check stands between the attacker and a rewritten
+        // recipient. Seal a legitimate assignment to charlie, then rewrite the
+        // envelope's unauthenticated beneficiary field to the attacker.
+        let alice = SigningKey::generate(&mut OsRng);
+        let bob = SigningKey::generate(&mut OsRng);
+        let charlie = SigningKey::generate(&mut OsRng);
+        let attacker = SigningKey::generate(&mut OsRng);
+
+        let e1 = create_receipt(&alice, &bob.verifying_key(), 1000, None).unwrap();
+        let mut e2 = assign_receipt(&e1, &bob, &charlie.verifying_key(), None).unwrap();
+
+        // The chain is valid before tampering.
+        verify_receipt_chain_with_keys(&[e1.clone(), e2.clone()], &[&bob, &charlie])
+            .expect("untampered chain must verify");
+
+        // Attacker flips the beneficiary field. It is not covered by the chunk
+        // signatures, so the envelope still self-verifies and still unseals with
+        // charlie's key (decryption keys off verifying_key_bytes, not this field)…
+        e2.overwrite_beneficiary_for_test(attacker.verifying_key().to_bytes());
+        assert!(e2.verify(), "rewritten envelope still passes bare verify()");
+
+        // …but the in-payload beneficiary (charlie) no longer matches the envelope
+        // beneficiary field (attacker), so party-authenticity rejects it.
+        let err = verify_receipt_chain_with_keys(&[e1, e2], &[&bob, &charlie])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("receipt beneficiary does not match the envelope beneficiary"),
             "got: {err}"
         );
     }

@@ -76,7 +76,8 @@ an acceptable alternative if specified byte-for-byte):
 1. `version: u8` — **must be inside the preimage** (see A3).
 2. `verifying_key_bytes: [u8;32]`
 3. `beneficiary_key_bytes: [u8;32]`
-4. `hkdf_salt: [u8; N]`
+4. `hkdf_salt: [u8; 32]` — fixed 32-byte salt (matches the struct today,
+   envelope.rs:37); the preimage encodes exactly these 32 bytes, no length prefix.
 5. `metadata` — with its own field order pinned explicitly (enumerate every
    `EnvelopeMetadata` field and its order in this doc when implementing).
 6. ordered `blake3(manifest_bytes)` of each chunk, in ascending `sequence`.
@@ -113,6 +114,8 @@ Therefore:
 - **Ship a "reject unknown versions" gate in a v2 patch release *before or with*
   v3.** `verify()`/`unseal()` must read `version` and refuse anything they don't
   understand, closing the JSON silent-accept path on already-deployed binaries.
+  **DONE** — shipped ahead of v3: `Envelope::verify` returns `false` and
+  `Envelope::unseal` errors for any `version != ENVELOPE_VERSION_V2` (envelope.rs).
 - **Document the JSON-vs-bincode divergence** for integrators.
 - `seal()` emits v3; `verify()` requires a valid `header_sig` for v3. **Reject v2 in
   `verify()` by default**, with an explicit, non-public legacy opt-in (see below).
@@ -150,7 +153,7 @@ no CLI/platform consumer of receipts exists today.
   ledgerless).
 - No ZKP.
 - Retrofitting domain separation onto chunk/auth signatures (worth doing, tracked
-  separately).
+  in `docs/designs/signature-domain-separation.md`).
 
 ## Acceptance
 
@@ -158,7 +161,18 @@ no CLI/platform consumer of receipts exists today.
   covered header field, incl. a downgraded `version`) was altered post-seal.
 - Cross-object confusion test: a chunk-manifest signature or an `auth.rs` signature
   is not accepted as a `header_sig` (domain-separation prefix enforced).
+- **Same-issuer chunk-splice test:** given two v3 envelopes sealed by the *same*
+  issuer key (so per-chunk signatures remain individually valid after moving), a
+  verifier rejects an envelope whose chunk set is spliced from the other — chunks
+  reordered, added, dropped, or swapped in. `header_sig` covers the ordered
+  `blake3(manifest_bytes)` of every chunk in ascending `sequence` (field 6), so any
+  such edit changes the preimage and invalidates `header_sig`. This is the case the
+  per-chunk signatures alone cannot catch (they say each chunk is authentic, not that
+  *this* set in *this* order is the sealed set).
 - Deployed-binary safety: a pre-v3 binary with the v2 "reject unknown versions" gate
   refuses a v3 envelope under both bincode and serde_json (no silent accept).
+  **(Gate shipped ahead of v3** — `Envelope::verify`/`unseal` reject any
+  `version != 2`, envelope.rs; see `ENVELOPE_VERSION_V2`. The serde_json divergence
+  this closes is the reason it landed early.)
 - Golden vectors for `header_sig` pass identically in Rust and both WASM verifiers.
 - Round-trip + existing golden vectors pass for v3.
