@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `assert!`-panic on out-of-range input (a caller-controlled process crash) — they
   now return `Result` (**breaking**). SECURITY.md also now states the receipts module
   has no double-spend resistance by design. (cyberscan #2)
+- **PBKDF2 ceiling on the remaining load paths + unified constant.** Extended the
+  work-factor upper bound to every KDF entry point that reads a caller/attacker-
+  supplied count: the encrypted key-file path (`DeviceKeypair::import_secret_encrypted`,
+  the one residual with a real input path — checked as `u64` before the `u32`
+  narrowing so an out-of-range value can never truncate into the accepted band) and
+  the `KeyringBackend` derive (`keyring.rs`, now via the shared validator). All paths
+  share the single canonical `PBKDF2_MAX_ITERATIONS` in `backends::universal`
+  (`keywrap.rs` no longer defines its own copy). (cyberscan #2 follow-up)
 
 ### Added
 

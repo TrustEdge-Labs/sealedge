@@ -245,6 +245,17 @@ impl DeviceKeypair {
                 iterations_u64, PBKDF2_MIN_ITERATIONS
             )));
         }
+        // Upper bound (cyberscan #2): a key file is untrusted input, and an absurd
+        // count would stall load under attacker-controlled CPU. Reject before the
+        // u32 narrowing so an out-of-range value can never truncate into the
+        // accepted band. Shares the crate-wide ceiling from `backends::universal`.
+        if iterations_u64 > crate::backends::universal::PBKDF2_MAX_ITERATIONS as u64 {
+            return Err(CryptoError::InvalidKeyFormat(format!(
+                "Key file uses {} PBKDF2 iterations, maximum is {}",
+                iterations_u64,
+                crate::backends::universal::PBKDF2_MAX_ITERATIONS
+            )));
+        }
         let iterations = u32::try_from(iterations_u64)
             .map_err(|_| CryptoError::InvalidKeyFormat("iterations value out of range".into()))?;
 

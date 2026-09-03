@@ -476,3 +476,27 @@ fn sec_12_json_extra_unknown_fields() {
     // Must NOT fail with InvalidKeyFormat — unknown fields are tolerated
     assert_decryption_failed(result, "Wrong passphrase");
 }
+
+/// SEC-12: An `iterations` value above the accepted ceiling is rejected (cyberscan #2).
+///
+/// A key file is untrusted input; an absurd iteration count would stall load under
+/// attacker-controlled CPU. The upper bound must fire on both a value just over the
+/// ceiling and one that overflows `u32` — the latter proves the count is judged as a
+/// `u64` before any narrowing, so it can never truncate into the accepted band.
+#[test]
+fn sec_12_json_iterations_above_maximum() {
+    let salt_b64 = BASE64.encode([0u8; 32]);
+    let nonce_b64 = BASE64.encode([0u8; 12]);
+
+    // Just over the 10M ceiling (still within u32).
+    let meta = format!(r#"{{"salt":"{salt_b64}","nonce":"{nonce_b64}","iterations":10000001}}"#);
+    let data = build_corrupted_key_file(&meta, b"dummy-ciphertext");
+    let result = DeviceKeypair::import_secret_encrypted(&data, "any-passphrase");
+    assert_invalid_key_format(result, "maximum is");
+
+    // Overflows u32 (~5e9): must still be rejected as too large, never truncated.
+    let meta = format!(r#"{{"salt":"{salt_b64}","nonce":"{nonce_b64}","iterations":5000000000}}"#);
+    let data = build_corrupted_key_file(&meta, b"dummy-ciphertext");
+    let result = DeviceKeypair::import_secret_encrypted(&data, "any-passphrase");
+    assert_invalid_key_format(result, "maximum is");
+}

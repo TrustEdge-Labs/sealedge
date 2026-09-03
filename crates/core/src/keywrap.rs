@@ -39,6 +39,7 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey as XPublic, StaticSecret as XSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::backends::universal::PBKDF2_MAX_ITERATIONS;
 use crate::crypto::{CryptoError, DeviceKeypair};
 
 /// HPKE ciphersuite (RFC 9180) — must match the manifest `encryption.hpke` block.
@@ -57,11 +58,11 @@ const KEY_AGREEMENT_PREFIX: &str = "x25519:";
 const BUNDLE_HEADER_V2: &str = "SEALEDGE-KEY-V2";
 /// Minimum PBKDF2-HMAC-SHA256 iterations (OWASP 2023). Mirrors `crypto.rs`.
 const PBKDF2_MIN_ITERATIONS: u32 = 600_000;
-/// Maximum accepted PBKDF2 iterations. Legitimate writers use exactly the floor;
-/// this ceiling (generous headroom over 600k) rejects a corrupt or hostile blob
-/// that sets an absurd count to stall decryption — an availability guard
-/// symmetric with the floor. F2.
-const PBKDF2_MAX_ITERATIONS: u32 = 10_000_000;
+// Maximum accepted PBKDF2 iterations is the crate-wide ceiling
+// [`PBKDF2_MAX_ITERATIONS`] from `backends::universal` (imported above): a cap
+// that rejects a corrupt or hostile blob setting an absurd count to stall
+// decryption — an availability guard symmetric with the floor (F2), unified onto
+// a single constant so every load path shares one value (cyberscan #2).
 
 /// On-disk header for a generic sealed secret — distinct from
 /// [`BUNDLE_HEADER_V2`] so a single-secret blob and a dual-key bundle can never
