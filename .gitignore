@@ -58,3 +58,6 @@ examples/cam.video/clip.seal/
 
 # Legacy get-shit-done planning artifacts (removed; recover from git history)
 .planning/
+
+# Third-party security scan reports (local artifacts, not source)
+prem-security-report.md
