@@ -8,16 +8,16 @@ Project: sealedge — Privacy and trust at the edge.
 
 # Envelope v3 — authenticate envelope-level metadata
 
-Status: **PROPOSED** (design only — not implemented). Tracks cyberscan finding #1,
-P1b. Breaking wire-format change; do it deliberately.
+Status: **APPROVED (with amendments) — design only, not implemented.** Tracks
+cyberscan finding #1, P1b. Breaking wire-format change; implement deliberately.
 
 ## Problem
 
 `Envelope::verify()` (crates/core/src/envelope.rs) authenticates **only** the
-per-chunk signatures (over each `ChunkManifest` hash: seq, size, timestamp) and the
-chunk sequence. Several envelope-level header fields are **cleartext, unsigned, and
-absent from the AEAD AAD** (AAD covers header_hash, seq, nonce, manifest_hash,
-chunk_len — see format.rs:304):
+per-chunk signatures (each `NetworkChunk`'s Ed25519 signature over
+`blake3(manifest_bytes)`) and the chunk sequence. Several envelope-level header
+fields are **cleartext, unsigned, and absent from the AEAD AAD** (AAD covers
+header_hash, seq, nonce, manifest_hash, chunk_len — format.rs:304):
 
 - `beneficiary_key_bytes` — the recipient identity.
 - `hkdf_salt`, `metadata` — key-derivation salt and envelope metadata.
@@ -27,64 +27,138 @@ bind `beneficiary_key_bytes`.
 
 ### Consequence
 
-`beneficiary_key_bytes` is malleable: an attacker can take any public envelope
-(e.g. Alice→Bob), rewrite its beneficiary to an attacker key, and `verify()` still
-returns `true`. This makes `verify_signature_chain`'s issuer→beneficiary continuity
-check graftable — append an attacker-issued successor and the signature/continuity
-screen passes. (The keyed `verify_receipt_chain_with_keys` already mitigates this for
-verifiers holding the decryption keys: it checks `prev_envelope_hash == prev.hash()`,
-and `hash()` covers the whole envelope including the beneficiary — but a *public*
-verifier, and `verify()` itself, still cannot detect the tamper.)
+`beneficiary_key_bytes` is malleable: take any public envelope (Alice→Bob), rewrite
+its beneficiary to an attacker key, and `verify()` still returns `true`. This makes
+`verify_signature_chain`'s issuer→beneficiary continuity check graftable. (The keyed
+`verify_receipt_chain_with_keys` already mitigates this for verifiers holding the
+decryption keys, via `prev_envelope_hash == prev.hash()` where `hash()` covers the
+whole envelope — but a *public* verifier, and `verify()` itself, cannot detect it.)
 
 ## Goal
 
-A public verifier (no decryption keys) can detect any tampering with envelope-level
+A public verifier (no decryption keys) detects any tampering with envelope-level
 metadata — starting with `beneficiary_key_bytes` — via `Envelope::verify()` alone.
 
-## Options
+## Solution: issuer signature over a frozen header preimage (Option A)
 
-- **A — issuer signature over the canonical header (recommended).** Add a top-level
-  Ed25519 signature by the issuer over a canonical serialization of the header:
-  `verifying_key_bytes`, `beneficiary_key_bytes`, `hkdf_salt`, `metadata`, and the
-  ordered chunk manifest hashes. `verify()` checks it. Public-verifiable (no
-  decryption), authenticates *all* metadata with one signature, and composes with
-  the existing chunk signatures.
-- **B — fold the fields into the per-chunk AAD.** Add `beneficiary_key_bytes`
-  (and `hkdf_salt`) to the AAD at format.rs:304. Binds them cryptographically, but
-  only *detectable on decrypt* — a public verifier still can't check them. Weaker
-  than A for the stated goal.
-- **C — both.** Belt-and-suspenders; A already covers the public-verifier goal.
+Add a top-level Ed25519 `header_sig` by the issuer over a **frozen preimage
+structure**, checked in `verify()`. (Considered and rejected: folding fields into
+the per-chunk AAD — only detectable on decrypt, fails the public-verifier goal; and
+the scanner's ZKP suggestion — overkill.)
 
-**Recommendation: Option A.** B alone doesn't meet the public-verifiability goal; C
-is more than needed. Skip the scanner's ZKP suggestion (overkill).
+### A1. Signature domain separation (mandatory)
 
-## Format / compatibility
+Chunk signatures today are raw `sign(blake3(manifest_bytes))` with **no prefix**,
+and `auth.rs` signs unrelated payloads (cert_data, session_data, challenges) with
+the same Ed25519 key class. A bare `sign(blake3(canonical_header))` would share a
+signature shape with those — cross-object confusion becomes a layout coincidence
+away from exploitable. **`header_sig` MUST sign a domain-separated preimage:**
 
-- Bump the envelope format version `v2 → v3`. v3 carries a `header_sig` field.
-- `verify()`: v3 requires a valid `header_sig`; decide v2 policy — either reject v2
-  (clean, forces re-seal) or accept v2 with a documented "unauthenticated metadata"
-  caveat during a transition window. Prefer **reject v2 in verify by default**, with
-  an explicit opt-in for legacy read, given the security intent.
-- `seal()` emits v3. No auto-migration of existing archives (re-seal to upgrade).
-- Update golden vectors and both WASM verifiers (sealedge-wasm, sealedge-seal-wasm).
+```
+header_sig = Ed25519_sign( issuer_sk,
+    b"SEALEDGE_ENVELOPE_V3_HEADER\0" || header_preimage_bytes )
+```
+
+The prefix is normative and fixed. (Follow-up, out of scope here: retrofitting
+domain-separation prefixes onto chunk and auth signatures.)
+
+### A2. Frozen header preimage (byte-exact, normative)
+
+Do **not** sign an ad-hoc "canonical serialization." Define a dedicated, frozen
+`EnvelopeHeaderV3` preimage with a fixed field list, fixed order, and fixed
+encoding. The two WASM verifiers (sealedge-wasm, sealedge-seal-wasm) reimplement
+this independently, so it must be byte-exact and covered by golden vectors.
+
+Fields, in this exact order (encoding: **bincode, little-endian** — consistent with
+the `hash()` precedent at envelope.rs:262; explicit length-prefixed concatenation is
+an acceptable alternative if specified byte-for-byte):
+
+1. `version: u8` — **must be inside the preimage** (see A3).
+2. `verifying_key_bytes: [u8;32]`
+3. `beneficiary_key_bytes: [u8;32]`
+4. `hkdf_salt: [u8; N]`
+5. `metadata` — with its own field order pinned explicitly (enumerate every
+   `EnvelopeMetadata` field and its order in this doc when implementing).
+6. ordered `blake3(manifest_bytes)` of each chunk, in ascending `sequence`.
+
+Ship golden test vectors (known keys/salt/metadata → known `header_sig`) so both
+WASM verifiers can be validated against the Rust implementation byte-for-byte.
+
+### A3. Version dispatch must be built from scratch, and version must be bound
+
+`version` is **write-only today**: `seal()` sets `version: 2` (envelope.rs:186) and
+nothing in `verify()`/`unseal()` ever reads it — only tests assert on it
+(envelope.rs:718/751/773/787). So:
+
+- **(a) Build real version dispatch.** With bincode's flat sequential layout you
+  cannot peek `version` mid-struct, so introduce a version-tagged enum or a custom
+  `Deserialize` that reads the leading `version` byte and dispatches. Plan this now;
+  it does not exist.
+- **(b) Bind `version` in the signed preimage** (field 1 above). Otherwise a v3
+  envelope can be re-labeled v2 to bypass the `header_sig` check.
+
+## Compatibility (amended — old binaries are silently unsafe under JSON)
+
+Because old binaries never check `version`, behavior on a v3 envelope diverges by
+codec:
+
+- **bincode:** the extra `header_sig` field fails deserialization → **fail-closed
+  (fine).**
+- **serde_json** (this codebase uses it — a test asserts `"version":2` in JSON
+  output): the unknown `header_sig` field is **silently ignored**, so an old binary
+  "verifies" a v3 envelope with the new security property **absent**.
+
+Therefore:
+
+- **Ship a "reject unknown versions" gate in a v2 patch release *before or with*
+  v3.** `verify()`/`unseal()` must read `version` and refuse anything they don't
+  understand, closing the JSON silent-accept path on already-deployed binaries.
+- **Document the JSON-vs-bincode divergence** for integrators.
+- `seal()` emits v3; `verify()` requires a valid `header_sig` for v3. **Reject v2 in
+  `verify()` by default**, with an explicit, non-public legacy opt-in (see below).
+  No auto-migration of existing archives (re-seal to upgrade).
+
+## P1a interaction & transition policy (mixed v2→v3 chains)
+
+`verify_receipt_chain_with_keys` recomputes `prev.hash()` over whole envelopes, so a
+mixed v2→v3 chain verifies correctly on the hash-link math. But "reject v2 in
+`verify()` by default" means the keyed verifier would refuse legacy v2 predecessors
+unless it explicitly opts into a legacy read path. Pin this:
+
+- **Keyed receipt verification (`verify_receipt_chain_with_keys`):** MAY use the
+  legacy opt-in to accept v2 predecessors, with the documented caveat that v2
+  metadata is unauthenticated (the hash-link still binds the predecessor's bytes).
+- **Public `verify_signature_chain` and bare `Envelope::verify()`:** MUST NEVER use
+  the legacy opt-in.
+- **Opt-in shape:** a distinct, explicit parameter/type (e.g. an
+  `AllowLegacyV2`/`VerifyPolicy` argument), **not** a mutable global or default, and
+  scoped/named so it cannot leak into public verification paths by accident. It must
+  be impossible to reach the legacy path without naming it at the call site.
 
 ## Blast radius
 
-`envelope.rs` (seal/verify/struct + version), `format.rs` (AAD if Option B/C),
-golden-vector fixtures, WASM verify paths, and any receipts docs. No CLI/platform
-consumer of the receipts module today, so the archive `.seal` format (separate,
-`trst_version` 0.2.0) is unaffected — this is the `Envelope` format used by the
-receipts/attestation layer.
+`envelope.rs` (struct + `version` dispatch + `seal`/`verify` + `header_sig`),
+`format.rs` (only if AAD is also touched — not required by Option A), golden-vector
+fixtures, both WASM verify paths, the v2-patch "reject unknown versions" gate, and
+receipts docs. The archive `.seal` format (separate, `trst_version` 0.2.0) is
+unaffected — this is the `Envelope` format used by the receipts/attestation layer;
+no CLI/platform consumer of receipts exists today.
 
 ## Non-goals
 
-- No double-spend resistance / ledger (out of scope; the receipts module is
-  deliberately ledgerless).
+- No double-spend resistance / ledger (the receipts module is deliberately
+  ledgerless).
 - No ZKP.
+- Retrofitting domain separation onto chunk/auth signatures (worth doing, tracked
+  separately).
 
 ## Acceptance
 
-- A public verifier rejects an envelope whose `beneficiary_key_bytes` (or other
-  covered header field) was altered post-seal.
-- Round-trip + golden vectors pass for v3; the malleability test (rewrite
-  beneficiary → `verify()` must now return false) is added.
+- A public verifier rejects a v3 envelope whose `beneficiary_key_bytes` (or any
+  covered header field, incl. a downgraded `version`) was altered post-seal.
+- Cross-object confusion test: a chunk-manifest signature or an `auth.rs` signature
+  is not accepted as a `header_sig` (domain-separation prefix enforced).
+- Deployed-binary safety: a pre-v3 binary with the v2 "reject unknown versions" gate
+  refuses a v3 envelope under both bincode and serde_json (no silent accept).
+- Golden vectors for `header_sig` pass identically in Rust and both WASM verifiers.
+- Round-trip + existing golden vectors pass for v3.
