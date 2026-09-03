@@ -14,7 +14,7 @@
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
-use sealedge_core::{assign_receipt, create_receipt, verify_receipt_chain};
+use sealedge_core::{assign_receipt, create_receipt, verify_signature_chain};
 
 fn main() -> Result<()> {
     println!("🏢 Sealedge Receipt Demo: The Office Analogy in Action\n");
@@ -116,9 +116,11 @@ fn main() -> Result<()> {
     // Step 5: Verify the entire chain
     println!("🔗 Step 5: Verify the complete ownership chain");
     let chain = vec![original_envelope.clone(), assignment_envelope.clone()];
-    let chain_valid = verify_receipt_chain(&chain);
+    // NOTE: this checks envelope signatures + issuer/beneficiary continuity only —
+    // not receipt-chain integrity (see verify_signature_chain docs).
+    let chain_valid = verify_signature_chain(&chain);
     println!(
-        "   Chain verification: {}",
+        "   Signature + continuity check: {}",
         if chain_valid {
             "✔ VALID"
         } else {

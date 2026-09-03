@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validates UTF-8 by borrow (no owned lossy copy of the secret). Completes the
   F1a key-material zeroization work.
 
+### Changed
+
+- **`verify_receipt_chain` → `verify_signature_chain` (breaking).** The name
+  overpromised: the function verifies per-envelope signatures and issuer→
+  beneficiary continuity, **not** receipt-chain integrity — it does not check the
+  `prev_envelope_hash` links (needs the beneficiary's decryption key), amounts,
+  origin-ness, or the authenticity of the beneficiary (which is cleartext,
+  unsigned, and not in the AEAD AAD, making the continuity check malleable). Renamed
+  to reflect what it actually does, and the rustdoc + module now spell out exactly
+  what is *not* verified. The receipts module is marked unstable/pre-P0. Keyed full
+  verification (`verify_receipt_chain_with_keys`) and binding the beneficiary into
+  the signed/AAD metadata (v2→v3 format) are planned follow-ups. (cyberscan #1)
+
 ## [6.2.0] - 2026-09-02
 
 ### Security — key-bundle zeroization & recovery integrity

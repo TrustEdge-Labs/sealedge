@@ -12,6 +12,12 @@
 //! It handles business logic for transferable claims (receipts) without worrying
 //! about cryptographic details. That's the job of the "Security Guard" (sealedge-core).
 //!
+//! > **Status: unstable / pre-P0 — not production-ready.** Receipt *contents*
+//! > (amounts, `prev_envelope_hash` links, origin-ness) are not verifiable by a
+//! > public verifier, and [`verify_signature_chain`] checks only signatures plus a
+//! > *malleable* issuer/beneficiary continuity heuristic — not receipt-chain
+//! > integrity. Read its docs before relying on any result here.
+//!
 //! ## The OwnershipReceipt System
 //!
 //! A OwnershipReceipt represents a transferable claim with these properties:
@@ -294,16 +300,41 @@ pub fn extract_receipt(
     Ok(receipt)
 }
 
-/// Verify a chain of receipt assignments
+/// Verify per-envelope signatures and issuer→beneficiary continuity across a chain.
 ///
-/// This function validates that a series of envelopes form a valid ownership chain.
+/// **Unstable, pre-P0 — this is NOT full receipt-chain verification, and a `true`
+/// result must not be read as "receipt chain integrity verified."** It returns
+/// `true` only when:
+/// 1. every envelope's chunk signatures are valid ([`Envelope::verify`]), and
+/// 2. each envelope's issuer equals the previous envelope's beneficiary.
+///
+/// It deliberately does **not** check the following, so `true` does **not** imply
+/// any of them:
+/// - **Hash links.** The `prev_envelope_hash` in each receipt payload is never
+///   compared against the predecessor's [`Envelope::hash`]. Doing so requires the
+///   beneficiary's decryption key (payloads are encrypted per-recipient via ECDH),
+///   which a public verifier does not have — see `verify_receipt_chain_with_keys`
+///   (planned) for the keyed path.
+/// - **Amounts / receipt contents.** Encrypted per-beneficiary; not readable or
+///   checkable here.
+/// - **Origin.** The first envelope is not verified to be a genuine genesis
+///   (`prev_envelope_hash == None`).
+/// - **Beneficiary authenticity.** `beneficiary_key_bytes` is cleartext and is
+///   covered by neither a signature nor the AEAD AAD, so continuity check (2) is
+///   malleable: an attacker can rewrite an envelope's beneficiary — `verify()`
+///   still passes — and graft an attacker-issued successor, and this function
+///   still returns `true`. Binding the beneficiary is a v2→v3 envelope-format
+///   change (fold it into what the issuer signs / the AAD).
+///
+/// There is also no double-spend resistance (no ledger). Use this only as a
+/// signature-validity + continuity screen, never as proof of receipt integrity.
 ///
 /// # Arguments
 /// * `envelopes` - The chain of envelopes, ordered from origin to final assignment
 ///
 /// # Returns
-/// True if the chain is valid, false otherwise
-pub fn verify_receipt_chain(envelopes: &[Envelope]) -> bool {
+/// `true` iff (1) and (2) above hold for every link; `false` otherwise (incl. empty).
+pub fn verify_signature_chain(envelopes: &[Envelope]) -> bool {
     if envelopes.is_empty() {
         return false;
     }
@@ -460,10 +491,10 @@ mod tests {
             .expect("Failed to assign receipt");
 
         let chain = vec![envelope1, envelope2];
-        assert!(verify_receipt_chain(&chain));
+        assert!(verify_signature_chain(&chain));
 
         // Test empty chain
-        assert!(!verify_receipt_chain(&[]));
+        assert!(!verify_signature_chain(&[]));
     }
 
     #[test]
@@ -569,7 +600,7 @@ mod tests {
 
         // Verify chain integrity
         let chain = vec![envelope1, envelope2];
-        assert!(verify_receipt_chain(&chain));
+        assert!(verify_signature_chain(&chain));
     }
 
     #[test]
@@ -726,7 +757,7 @@ mod tests {
         // Verify the complete chain
         let chain = vec![envelope1, envelope2, envelope3, envelope4];
         assert!(
-            verify_receipt_chain(&chain),
+            verify_signature_chain(&chain),
             "Complete chain should be valid"
         );
     }
@@ -1174,35 +1205,35 @@ mod tests {
         // Legitimate chain should verify
         let legitimate_chain = vec![envelope1.clone(), envelope2.clone(), envelope3.clone()];
         assert!(
-            verify_receipt_chain(&legitimate_chain),
+            verify_signature_chain(&legitimate_chain),
             "Legitimate chain should verify"
         );
 
         // Test broken chain (missing middle envelope)
         let broken_chain = vec![envelope1.clone(), envelope3.clone()];
         assert!(
-            !verify_receipt_chain(&broken_chain),
+            !verify_signature_chain(&broken_chain),
             "Broken chain should not verify"
         );
 
         // Test out-of-order chain
         let out_of_order_chain = vec![envelope2.clone(), envelope1.clone(), envelope3.clone()];
         assert!(
-            !verify_receipt_chain(&out_of_order_chain),
+            !verify_signature_chain(&out_of_order_chain),
             "Out-of-order chain should not verify"
         );
 
         // Test chain with duplicate envelope
         let duplicate_chain = vec![envelope1.clone(), envelope2.clone(), envelope2.clone()];
         assert!(
-            !verify_receipt_chain(&duplicate_chain),
+            !verify_signature_chain(&duplicate_chain),
             "Chain with duplicates should not verify"
         );
 
         // Test single envelope (should verify as valid chain of length 1)
         let single_chain = vec![envelope1.clone()];
         assert!(
-            verify_receipt_chain(&single_chain),
+            verify_signature_chain(&single_chain),
             "Single envelope should verify as valid chain"
         );
     }
