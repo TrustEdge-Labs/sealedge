@@ -2,11 +2,16 @@
 # MPL-2.0: https://mozilla.org/MPL/2.0/
 # Project: sealedge — Privacy and trust at the edge.
 #
-# Tamed Dependabot: weekly, grouped into one PR per ecosystem, and capped low so
-# stale branches never pile up again. Grouped PRs mean a single branch per
-# ecosystem at a time; merged branches auto-delete (repo setting). This also
-# covers Cargo deps, replacing the removed weekly cargo-update workflow — unlike
-# a GITHUB_TOKEN Actions job, Dependabot is allowed to open PRs.
+# Tamed Dependabot: weekly, grouped into one PR per ecosystem, capped low so
+# stale branches never pile up. Merged branches auto-delete (repo setting).
+#
+# Majors are IGNORED for cargo and npm: a grouped major bump (e.g. hpke, or
+# TypeScript 7) breaks the build and produces a giant red PR. Minor+patch only
+# keeps the weekly PR small, safe, and green. github-actions takes all updates
+# (action majors are low-risk and are how Node-runtime deprecations get cleared).
+#
+# This also covers Cargo deps, replacing the removed weekly cargo-update
+# workflow — unlike a GITHUB_TOKEN Actions job, Dependabot is allowed to open PRs.
 version: 2
 updates:
   - package-ecosystem: "cargo"
@@ -17,6 +22,10 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "npm"
     directory: "/web/dashboard"
@@ -26,6 +35,10 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
