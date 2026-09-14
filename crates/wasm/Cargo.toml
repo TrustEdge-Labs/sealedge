@@ -35,7 +35,7 @@ aes-gcm = { workspace = true }
 rand = { workspace = true }
 getrandom = { workspace = true }  # v0.3 with "wasm_js" for rand 0.9's dependency chain
 getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }  # Activates "js" on transitive getrandom 0.2 for WASM target
-base64 = "0.22"
+base64 = "0.23"
 
 # Console logging for debugging
 console_error_panic_hook = "0.1"

@@ -34,12 +34,12 @@ js-sys = { workspace = true }
 console_error_panic_hook = "0.1"
 
 # WASM-compatible crypto dependencies
-ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["rand_core"] }
 getrandom = { version = "0.2", features = ["js"] }  # Activates "js" on transitive getrandom 0.2 for WASM target
 getrandom_v03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }  # Activates "wasm_js" on getrandom 0.3 for rand 0.9's chain
 aes-gcm = { workspace = true }
 rand = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 
 [dependencies.web-sys]
 version = "0.3"

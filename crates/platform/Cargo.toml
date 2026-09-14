@@ -29,7 +29,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -37,32 +37,32 @@ rand = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
 tracing = "0.1"
-jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
 regex = "1.0"
-utoipa = { version = "4.0", features = ["axum_extras", "chrono", "uuid"], optional = true }
+utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"], optional = true }
 
 # Feature-gated: postgres
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-native-tls", "postgres", "chrono", "uuid", "migrate"], optional = true }
-bcrypt = { version = "0.15", optional = true }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-native-tls", "postgres", "chrono", "uuid", "migrate"], optional = true }
+bcrypt = { version = "0.19", optional = true }
 
 # Feature-gated: http (token hashing and env config loading)
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 dotenvy = { version = "0.15", optional = true }
 
 # Feature-gated: ca
-x509-parser = { version = "0.16", optional = true }
-der = { version = "0.7", optional = true }
-spki = { version = "0.7", optional = true }
-pkcs8 = { version = "0.10", optional = true }
-x509-cert = { version = "0.2", optional = true }
-const-oid = { version = "0.9", optional = true }
+x509-parser = { version = "0.18", optional = true }
+der = { version = "0.8", optional = true }
+spki = { version = "0.8", optional = true }
+pkcs8 = { version = "0.11", optional = true }
+x509-cert = { version = "0.3", optional = true }
+const-oid = { version = "0.10", optional = true }
 
 # Feature-gated: http
 axum = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
-utoipa-swagger-ui = { version = "6.0", features = ["axum"], optional = true }
+utoipa-swagger-ui = { version = "9.0", features = ["axum"], optional = true }
 governor = { version = "0.10", features = ["dashmap"], optional = true }
 ipnet = { version = "2", optional = true }
 
@@ -80,11 +80,11 @@ tokio = { workspace = true }
 rand = { workspace = true }
 ed25519-dalek = { workspace = true }
 anyhow = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 tempfile = "3"
 # HTTP integration test utilities
 axum = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 # Platform integration test utilities (DB-backed tests, all #[ignore])
 # Uses 14.x which is compatible with axum 0.7 (our workspace version)
-axum-test = "14.10"
+axum-test = "21.0"

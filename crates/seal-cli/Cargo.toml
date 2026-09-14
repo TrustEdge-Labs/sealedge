@@ -25,7 +25,7 @@ yubikey = ["sealedge-core/yubikey"]
 
 [dependencies]
 anyhow = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 ed25519-dalek = { workspace = true }
@@ -37,11 +37,11 @@ serde_json = { workspace = true }
 sealedge-core = { path = "../core" }
 sealedge-types = { workspace = true }
 hex = { workspace = true }
-chacha20poly1305 = "0.10"
-rand = "0.9"
+chacha20poly1305 = "0.11"
+rand = "0.10"
 rand_chacha = "0.9"
 # reqwest 0.12 (hyper 1.x) pulls patched h2 >=0.4.16 — RUSTSEC-2026-0258.
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 blake3 = { workspace = true }
 zeroize = { workspace = true }

@@ -21,5 +21,5 @@ path = "verify_cli.rs"
 [dependencies]
 sealedge-core = { path = "../../crates/core" }
 chrono = { version = "0.4", features = ["serde"] }
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 hex = "0.4"
