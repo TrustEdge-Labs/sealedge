@@ -124,10 +124,11 @@ jobs:
       - uses: taiki-e/install-action@5e35b238ee3d0a48aa25ae877adcff74a6ddd2e0 # cargo-audit
 
       - name: Security audit
-        # --deny warnings: fail on any advisory (vulnerability OR informational
-        # warning e.g. yanked/unmaintained) unless accepted in .cargo/audit.toml.
-        # Matches ci-check.sh and deps-update.yml — one definition of "audit clean".
-        run: cargo audit --deny warnings
+        # Fail only on actual vulnerabilities (cargo audit default). Informational
+        # warnings (yanked/unmaintained/unsound) are reported but non-fatal — they
+        # are outside-world churn, not exploits. Accepted vulnerabilities live in
+        # .cargo/audit.toml. Matches scripts/ci-check.sh — one definition of clean.
+        run: cargo audit
 
   # ── Self-attestation (release tags only) ─────────────────────
   self-attestation:

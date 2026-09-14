@@ -95,13 +95,15 @@ fi
 # ── Step 2: Security audit ──────────────────────────────────────────
 if ! $FAST; then
 step "Step 2: Security audit (cargo-audit)"
-# --deny warnings: any advisory (vulnerability OR informational warning) fails the
-# build unless it is explicitly accepted in .cargo/audit.toml with a justification.
+# Fails only on actual VULNERABILITIES (cargo audit's default). Informational
+# warnings (yanked / unmaintained / unsound) are reported but do not fail the
+# build — they are outside-world churn, not exploits, and shouldn't redden a
+# solo repo's CI. Accepted vulnerabilities are still listed in .cargo/audit.toml.
 if command -v cargo-audit &> /dev/null; then
-    if cargo audit --deny warnings; then
-        pass "cargo audit (deny warnings)"
+    if cargo audit; then
+        pass "cargo audit (vulnerabilities)"
     else
-        fail "cargo audit — new advisory; fix it or justify-and-ignore in .cargo/audit.toml"
+        fail "cargo audit — new vulnerability; fix it or justify-and-ignore in .cargo/audit.toml"
     fi
 else
     skip "cargo-audit not installed (install: cargo install cargo-audit)"
